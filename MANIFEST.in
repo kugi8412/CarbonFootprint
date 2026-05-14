@@ -1,0 +1,10 @@
+include README.md
+include LICENSE
+include pyproject.toml
+include CMakeLists.txt
+include build.bat
+include build.sh
+
+recursive-include carbon_tracker *.py
+recursive-include include *.h
+recursive-include src *.cpp
