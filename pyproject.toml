@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "carbon-footprint-tracker"
-version = "1.1.2"
+dynamic = ["version"]
 description = "Track and compute the carbon footprint of your computer usage in real-time. Per-process energy monitoring, auto hardware detection, live grid carbon intensity, GUI, CLI, and project file management."
 readme = "README.md"
 license = {text = "MIT"}
@@ -58,6 +58,9 @@ Issues = "https://github.com/kugi8412/CarbonFootprint/issues"
 [project.scripts]
 carbon-tracker = "carbon_tracker.cli:main"
 carbon-tracker-gui = "carbon_tracker.gui:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "carbon_tracker._version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]

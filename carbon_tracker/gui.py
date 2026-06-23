@@ -493,9 +493,7 @@ class CarbonTrackerGUI(QMainWindow):
             self.zone_desc = desc
             QTimer.singleShot(0, lambda: self._on_zone_detected(zone, desc))
         else:
-            QTimer.singleShot(
-                0, lambda: self._zone_label.setText("Zone: not detected (set manually)")
-            )
+            QTimer.singleShot(0, lambda: self._zone_label.setText("Zone: not detected (set manually)"))
 
     def _on_zone_detected(self, zone: str, desc: str):
         self._zone_label.setText(f"Zone: {zone} ({desc})")
@@ -738,6 +736,12 @@ class CarbonTrackerGUI(QMainWindow):
         live_marker = "(live)" if snap["intensity_real"] else "(est.)"
         self._stat_intensity.set_value(f"{intensity:.0f} gCO₂/kWh {live_marker}")
 
+        # Warn the user when power is estimated rather than measured.
+        if snap.get("power_estimated", True):
+            power_status = "Power: ESTIMATED (TDP heuristic) [!]"
+        else:
+            power_status = f"Power: measured ({snap.get('power_source', 'battery')})"
+
         # Update per-app table
         self._app_tree.clear()
         apps = snap.get("apps", {})
@@ -767,12 +771,15 @@ class CarbonTrackerGUI(QMainWindow):
         # Add monitored apps that haven't been detected yet
         for name in monitored:
             if name not in shown:
-                item = QTreeWidgetItem([name, "—", "—", "—", "—", "0h00m", "waiting"])
+                item = QTreeWidgetItem(
+                    [name, "—", "—", "—", "—", "0h00m", "waiting"]
+                )
                 self._app_tree.addTopLevelItem(item)
 
         self.statusBar().showMessage(
             f"CO₂: {carbon:.3f}g | Energy: {energy:.3f}Wh | "
-            f"Zone: {snap['zone']} | Intensity: {intensity:.0f} gCO₂/kWh"
+            f"Zone: {snap['zone']} | Intensity: {intensity:.0f} gCO₂/kWh | "
+            f"{power_status}"
         )
 
     # ---- Project management ----
@@ -1004,19 +1011,49 @@ class CarbonTrackerGUI(QMainWindow):
             return
         hours = self._forecast_hours_spin.value()
         result = self.project.project_future(hours)
+        method = result.get("method", "average")
         msg = (
-            f"\n<== FORECAST for {result['projected_hours']:.1f} hours ==>\n"
+            f"\n<== FORECAST for {result['projected_hours']:.1f} hours "
+            f"[{method}] ==>\n"
             f"  Projected CO₂:    {result['projected_carbon_grams']:.2f} g\n"
+        )
+        if method == "gaussian_mixture":
+            msg += (
+                f"    95% range:      "
+                f"{result.get('carbon_low_grams', 0):.2f} - "
+                f"{result.get('carbon_high_grams', 0):.2f} g\n"
+            )
+            comps = result.get("carbon_components", [])
+            if len(comps) > 1:
+                modes = ", ".join(
+                    f"{c['rate']:.1f} g/h ({c['weight'] * 100:.0f}%)" for c in comps
+                )
+                msg += f"    Usage modes:    {modes}\n"
+        msg += (
             f"  Projected Energy: {result['projected_energy_kwh'] * 1000:.2f} Wh\n"
             f"  Rate:             {result['rate_grams_per_hour']:.2f} gCO₂/hour\n"
             f"  Based on:         {result['based_on_sessions']} sessions "
             f"({result['based_on_hours']:.1f}h of data)\n"
         )
 
+        per_app = result.get("per_app", {})
+        if per_app:
+            msg += "\n  <== Per-App Forecast (top 5 by CO₂) ==>\n"
+            top = sorted(
+                per_app.items(), key=lambda x: -x[1]["projected_carbon_grams"]
+            )[:5]
+            for name, app in top:
+                pm = app["rate_std_grams_per_hour"] * result["projected_hours"]
+                msg += (
+                    f"    {name:22s} CO₂={app['projected_carbon_grams']:.2f}g "
+                    f"(±{pm:.2f}g)  "
+                    f"Energy={app['projected_energy_kwh'] * 1000:.2f}Wh\n"
+                )
+
         # Equivalences
-        km_driving = result["projected_carbon_grams"] / 120.0
-        phone_charges = result["projected_energy_kwh"] / 0.01
-        tree_days = result["projected_carbon_grams"] / 60.0
+        km_driving = result['projected_carbon_grams'] / 120.0
+        phone_charges = result['projected_energy_kwh'] / 0.01
+        tree_days = result['projected_carbon_grams'] / 60.0
         msg += (
             f"\n  Equivalences:\n"
             f"    - Driving a car:     {km_driving:.4f} km\n"
@@ -1043,9 +1080,11 @@ class CarbonTrackerGUI(QMainWindow):
                 f"      Shifting compute to off-peak hours can help reduce emissions.\n"
             )
         else:
-            msg += f"  [+] Your grid has LOW carbon intensity ({intensity:.0f} gCO₂/kWh). Great!\n"
+            msg += (
+                f"  [+] Your grid has LOW carbon intensity ({intensity:.0f} gCO₂/kWh). Great!\n"
+            )
 
-        if result["based_on_hours"] > 8:
+        if result['based_on_hours'] > 8:
             msg += (
                 f"  [!] Long total working time ({result['based_on_hours']:.1f}h).\n"
                 f"      Consider taking breaks to reduce continuous power consumption.\n"

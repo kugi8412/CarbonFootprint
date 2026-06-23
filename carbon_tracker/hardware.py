@@ -64,6 +64,98 @@ def detect_cpu_cores() -> int:
         return os.cpu_count() or 4
 
 
+def _is_wsl() -> bool:
+    """True when running under Windows Subsystem for Linux."""
+    if platform.system() != "Linux":
+        return False
+    try:
+        with open("/proc/version") as f:
+            version_str = f.read().lower()
+        return "microsoft" in version_str or "wsl" in version_str
+    except OSError:
+        return False
+
+
+def detect_cpu_tdp_from_device() -> float:
+    """Read the real CPU package power limit (PL1 ~= TDP) from the Intel/AMD
+    RAPL powercap interface. Returns watts, or 0.0 when unavailable
+    (Windows, macOS and most WSL setups, where powercap is not exposed)."""
+    if platform.system() != "Linux":
+        return 0.0
+
+    base = "/sys/class/powercap"
+    if not os.path.isdir(base):
+        return 0.0
+
+    try:
+        for entry in sorted(os.listdir(base)):
+            # Top-level package domains look like "intel-rapl:0",
+            # not subzones such as "intel-rapl:0:0".
+            if not re.match(r"intel-rapl:\d+$", entry):
+                continue
+
+            domain = os.path.join(base, entry)
+
+            # Confirm this domain is a CPU package (skip "psys", "dram").
+            name_file = os.path.join(domain, "name")
+            if os.path.exists(name_file):
+                with open(name_file) as f:
+                    if not f.read().strip().startswith("package"):
+                        continue
+
+            # Prefer the sustained long-term limit, then the max power rating.
+            for fname in ("constraint_0_power_limit_uw", "constraint_0_max_power_uw"):
+                fpath = os.path.join(domain, fname)
+                if os.path.exists(fpath):
+                    with open(fpath) as f:
+                        micro_watts = int(f.read().strip())
+                    if micro_watts > 0:
+                        return micro_watts / 1_000_000.0
+    except (OSError, ValueError):
+        pass
+    return 0.0
+
+
+def detect_gpu_tdp_from_device() -> float:
+    """Query the real GPU board power limit from the driver. nvidia-smi works on
+    Windows, Linux and WSL2; rocm-smi covers AMD on Linux. Returns watts, or
+    0.0 when no supported GPU/driver is present."""
+    # NVIDIA: the default power limit equals the board TDP.
+    for query in ("power.default_limit", "power.max_limit"):
+        try:
+            out = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    f"--query-gpu={query}",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            if out:
+                watts = float(out.splitlines()[0].strip())
+                if watts > 0:
+                    return watts
+        except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+            pass
+
+    # AMD ROCm (Linux).
+    try:
+        out = subprocess.check_output(
+            ["rocm-smi", "--showmaxpower"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        match = re.search(r"([\d.]+)\s*W", out)
+        if match:
+            watts = float(match.group(1))
+            if watts > 0:
+                return watts
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+        pass
+    return 0.0
+
+
 def detect_gpu_name() -> str:
     system = platform.system()
     try:
@@ -150,14 +242,7 @@ def detect_is_laptop() -> bool:
             return status.BatteryFlag not in (128, 255)
         elif system == "Linux":
             # Detect WSL - WSL does not have real battery info
-            is_wsl = False
-            try:
-                with open("/proc/version", "r") as f:
-                    version_str = f.read().lower()
-                    if "microsoft" in version_str or "wsl" in version_str:
-                        is_wsl = True
-            except OSError:
-                pass
+            is_wsl = _is_wsl()
 
             if is_wsl:
                 # On WSL, fall back to DMI chassis type from the host
@@ -216,8 +301,11 @@ def detect_hardware() -> HardwareInfo:
     info.gpu_name = detect_gpu_name()
     info.is_laptop = detect_is_laptop()
 
-    # Estimate TDPs from lookup tables
-    cpu_tdp = _match_tdp(info.cpu_name, _CPU_TDP_TABLE)
+    # CPU TDP: prefer the real value read from the device (RAPL), then the
+    # lookup table, then a core-count heuristic.
+    cpu_tdp = detect_cpu_tdp_from_device()
+    if cpu_tdp <= 0:
+        cpu_tdp = _match_tdp(info.cpu_name, _CPU_TDP_TABLE)
     if cpu_tdp > 0:
         info.cpu_tdp_watts = cpu_tdp
     else:
@@ -229,10 +317,15 @@ def detect_hardware() -> HardwareInfo:
         else:
             info.cpu_tdp_watts = 105.0
 
-    gpu_tdp = _match_tdp(info.gpu_name, _GPU_TDP_TABLE)
+    # GPU TDP: prefer the real board power limit from the driver, then the table.
+    gpu_tdp = detect_gpu_tdp_from_device()
+    if gpu_tdp <= 0:
+        gpu_tdp = _match_tdp(info.gpu_name, _GPU_TDP_TABLE)
 
     if gpu_tdp > 0:
         info.gpu_tdp_watts = gpu_tdp
+        if not info.gpu_name:
+            info.gpu_name = "GPU (driver-reported)"
     else:
         info.gpu_tdp_watts = 15.0
 

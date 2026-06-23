@@ -14,18 +14,26 @@ bool HardwareDetect::ContainsIgnoreCase(const std::string& haystack, const std::
 // CPU TDP Lookup Table
 const std::vector<HardwareDetect::CpuTdpEntry>& HardwareDetect::GetCpuTdpTable() {
     static const std::vector<CpuTdpEntry> table = {
-        // Intel Mobile (U/P series - laptops)
-        {"i7-14", 28}, {"i7-13", 28}, {"i7-12", 28}, {"i5-14", 28}, {"i5-13", 28}, {"i5-12", 28},
-        {"i7-11", 28}, {"i5-11", 28}, {"i7-10", 15}, {"i5-10", 15},
-        {"i9-14900H", 45}, {"i9-13900H", 45}, {"i7-14700H", 45}, {"i7-13700H", 45},
-        {"i5-14500H", 45}, {"i5-13500H", 45},
-        // Intel Desktop (K/KF/S series)
-        {"i9-14900K", 125}, {"i9-13900K", 125}, {"i9-12900K", 125},
-        {"i7-14700K", 125}, {"i7-13700K", 125}, {"i7-12700K", 125},
-        {"i5-14600K", 125}, {"i5-13600K", 125}, {"i5-12600K", 125},
-        {"i9-14900", 65}, {"i9-13900", 65}, {"i7-14700", 65}, {"i7-13700", 65},
-        {"i5-14600", 65}, {"i5-14400", 65}, {"i5-13600", 65}, {"i5-13400", 65},
-        {"i3-14", 60}, {"i3-13", 60}, {"i3-12", 60},
+        // --- Intel Desktop K/KF (full SKU, most specific) ---
+        {"i9-14900K", 125}, {"i9-13900K", 125}, {"i9-12900K", 125}, {"i9-11900K", 125}, {"i9-10900K", 125},
+        {"i7-14700K", 125}, {"i7-13700K", 125}, {"i7-12700K", 125}, {"i7-11700K", 125}, {"i7-10700K", 125},
+        {"i5-14600K", 125}, {"i5-13600K", 125}, {"i5-12600K", 125}, {"i5-11600K", 125}, {"i5-10600K", 125},
+        // --- Intel Mobile HX (55W) ---
+        {"i9-14900HX", 55}, {"i9-13950HX", 55}, {"i9-13900HX", 55}, {"i7-14700HX", 55}, {"i7-13700HX", 55},
+        // --- Intel Mobile H (45W, full SKU incl. 11th/10th gen) ---
+        {"i9-11900H", 45}, {"i7-11850H", 45}, {"i7-11800H", 45}, {"i7-11375H", 35}, {"i5-11400H", 45}, {"i5-11260H", 45},
+        {"i9-10980HK", 45}, {"i7-10870H", 45}, {"i7-10750H", 45}, {"i5-10500H", 45}, {"i5-10300H", 45},
+        // --- Intel Desktop non-K (65W, full SKU) ---
+        {"i9-14900", 65}, {"i9-13900", 65}, {"i9-12900", 65},
+        {"i7-14700", 65}, {"i7-13700", 65}, {"i7-12700", 65},
+        {"i5-14600", 65}, {"i5-14400", 65}, {"i5-13600", 65}, {"i5-13400", 65}, {"i5-12400", 65},
+        // --- Intel generic by generation (fallback) ---
+        {"i9-14", 45}, {"i7-14", 28}, {"i5-14", 28},
+        {"i9-13", 45}, {"i7-13", 28}, {"i5-13", 28},
+        {"i7-12", 28}, {"i5-12", 28},
+        {"i9-11", 45}, {"i7-11", 45}, {"i5-11", 45},
+        {"i9-10", 45}, {"i7-10", 45}, {"i5-10", 45},
+        {"i3-14", 60}, {"i3-13", 60}, {"i3-12", 60}, {"i3-11", 60}, {"i3-10", 60},
         // Intel generic patterns
         {"Core Ultra 9", 45}, {"Core Ultra 7", 28}, {"Core Ultra 5", 28},
         {"Xeon", 105}, {"Pentium", 35}, {"Celeron", 15},
@@ -54,13 +62,23 @@ const std::vector<HardwareDetect::CpuTdpEntry>& HardwareDetect::GetCpuTdpTable()
 // GPU TDP Lookup Table
 const std::vector<HardwareDetect::GpuTdpEntry>& HardwareDetect::GetGpuTdpTable() {
     static const std::vector<GpuTdpEntry> table = {
-        // NVIDIA RTX 40 series
-        {"RTX 4090", 450}, {"RTX 4080", 320}, {"RTX 4070 Ti", 285}, {"RTX 4070", 200},
-        {"RTX 4060 Ti", 160}, {"RTX 4060", 115}, {"RTX 4050", 115},
-        // NVIDIA RTX 40 Mobile
+        // NVIDIA laptop GPUs - MUST precede desktop entries (substring match:
+        // "RTX 4070 Laptop GPU" also contains "RTX 4070").
         {"RTX 4090 Laptop", 150}, {"RTX 4080 Laptop", 150}, {"RTX 4070 Laptop", 115},
         {"RTX 4060 Laptop", 100}, {"RTX 4050 Laptop", 75},
-        // NVIDIA RTX 30 series
+        {"RTX 3080 Ti Laptop", 150}, {"RTX 3080 Laptop", 150}, {"RTX 3070 Ti Laptop", 125},
+        {"RTX 3070 Laptop", 125}, {"RTX 3060 Laptop", 115}, {"RTX 3050 Ti Laptop", 75},
+        {"RTX 3050 Laptop", 75}, {"RTX 2080 Laptop", 150}, {"RTX 2070 Laptop", 115},
+        {"RTX 2060 Laptop", 90},
+        // NVIDIA professional / workstation (RTX A-series and Ada)
+        {"RTX A5500", 165}, {"RTX A5000", 165}, {"RTX A4500", 120}, {"RTX A4000", 140},
+        {"RTX A3000", 90}, {"RTX A2000", 70}, {"RTX A1000", 50}, {"RTX A500", 35},
+        {"RTX 5000 Ada", 175}, {"RTX 4000 Ada", 130}, {"RTX 3500 Ada", 120},
+        {"RTX 3000 Ada", 90}, {"RTX 2000 Ada", 70},
+        // NVIDIA RTX 40 series (desktop)
+        {"RTX 4090", 450}, {"RTX 4080", 320}, {"RTX 4070 Ti", 285}, {"RTX 4070", 200},
+        {"RTX 4060 Ti", 160}, {"RTX 4060", 115}, {"RTX 4050", 115},
+        // NVIDIA RTX 30 series (desktop)
         {"RTX 3090 Ti", 450}, {"RTX 3090", 350}, {"RTX 3080 Ti", 350}, {"RTX 3080", 320},
         {"RTX 3070 Ti", 290}, {"RTX 3070", 220}, {"RTX 3060 Ti", 200}, {"RTX 3060", 170},
         {"RTX 3050", 130},
@@ -284,17 +302,7 @@ std::string HardwareDetect::DetectGpuName() {
 
 bool HardwareDetect::DetectIsLaptop() {
     // Check if running on WSL
-    bool isWsl = false;
-    std::ifstream procVersion("/proc/version");
-    if (procVersion.is_open()) {
-        std::string versionStr;
-        std::getline(procVersion, versionStr);
-        std::transform(versionStr.begin(), versionStr.end(), versionStr.begin(), ::tolower);
-        if (versionStr.find("microsoft") != std::string::npos ||
-            versionStr.find("wsl") != std::string::npos) {
-            isWsl = true;
-        }
-    }
+    bool isWsl = DetectIsWsl();
 
     if (isWsl) {
         // On WSL, battery detection is unreliable; use chassis type
@@ -403,6 +411,118 @@ bool HardwareDetect::DetectIsLaptop() {
 
 #endif
 
+// ============================================================
+// Cross-platform helpers (use real device values when available)
+// ============================================================
+
+bool HardwareDetect::DetectIsWsl() {
+#ifdef PLATFORM_LINUX
+    std::ifstream procVersion("/proc/version");
+    if (procVersion.is_open()) {
+        std::string versionStr;
+        std::getline(procVersion, versionStr);
+        std::transform(versionStr.begin(), versionStr.end(), versionStr.begin(), ::tolower);
+        if (versionStr.find("microsoft") != std::string::npos ||
+            versionStr.find("wsl") != std::string::npos) {
+            return true;
+        }
+    }
+#endif
+    return false;
+}
+
+double HardwareDetect::DetectCpuTdpFromDevice() {
+#ifdef PLATFORM_LINUX
+    // Intel/AMD RAPL exposes the package power limit (PL1 ~= TDP) through the
+    // kernel powercap interface. This is the real, device-reported value.
+    const std::string base = "/sys/class/powercap";
+    DIR* dir = opendir(base.c_str());
+    if (!dir) return 0.0;
+
+    double result = 0.0;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        // Top-level package domains look like "intel-rapl:0", not subzones
+        // such as "intel-rapl:0:0".
+        if (name.rfind("intel-rapl:", 0) != 0) continue;
+        if (std::count(name.begin(), name.end(), ':') != 1) continue;
+
+        std::string domain = base + "/" + name;
+
+        // Confirm this domain is a CPU package (skip e.g. "psys", "dram").
+        std::ifstream nameFile(domain + "/name");
+        if (nameFile.is_open()) {
+            std::string domainName;
+            std::getline(nameFile, domainName);
+            if (domainName.rfind("package", 0) != 0) continue;
+        }
+
+        // Prefer the sustained long-term limit, then the max power rating.
+        const char* files[] = {"/constraint_0_power_limit_uw",
+                               "/constraint_0_max_power_uw"};
+        for (const char* fname : files) {
+            std::ifstream f(domain + fname);
+            if (f.is_open()) {
+                long long microWatts = 0;
+                f >> microWatts;
+                if (microWatts > 0) {
+                    result = microWatts / 1000000.0;
+                    break;
+                }
+            }
+        }
+        if (result > 0) break;
+    }
+    closedir(dir);
+    return result;
+#else
+    // No portable CPU power-limit API exists on Windows/macOS.
+    return 0.0;
+#endif
+}
+
+double HardwareDetect::DetectGpuTdpFromDevice() {
+    // Ask the GPU driver for its real board power limit. nvidia-smi is available
+    // on Windows, Linux and WSL2; rocm-smi covers AMD on Linux.
+#ifdef PLATFORM_WINDOWS
+    const char* cmds[] = {
+        "nvidia-smi --query-gpu=power.default_limit --format=csv,noheader,nounits 2>NUL",
+        "nvidia-smi --query-gpu=power.max_limit --format=csv,noheader,nounits 2>NUL",
+    };
+    #define CF_POPEN _popen
+    #define CF_PCLOSE _pclose
+#else
+    const char* cmds[] = {
+        "nvidia-smi --query-gpu=power.default_limit --format=csv,noheader,nounits 2>/dev/null",
+        "nvidia-smi --query-gpu=power.max_limit --format=csv,noheader,nounits 2>/dev/null",
+        "rocm-smi --showmaxpower 2>/dev/null",
+    };
+    #define CF_POPEN popen
+    #define CF_PCLOSE pclose
+#endif
+    for (const char* cmd : cmds) {
+        FILE* pipe = CF_POPEN(cmd, "r");
+        if (!pipe) continue;
+        char buffer[256];
+        double watts = 0.0;
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            std::string line(buffer);
+            size_t p = line.find_first_of("0123456789.");
+            if (p != std::string::npos) {
+                try {
+                    double v = std::stod(line.substr(p));
+                    if (v > 0) { watts = v; break; }
+                } catch (...) {}
+            }
+        }
+        CF_PCLOSE(pipe);
+        if (watts > 0) return watts;
+    }
+    #undef CF_POPEN
+    #undef CF_PCLOSE
+    return 0.0;
+}
 
 double HardwareDetect::EstimateCpuTdp(const std::string& cpuName, int cores) {
     if (!cpuName.empty()) {
@@ -438,15 +558,38 @@ double HardwareDetect::EstimateBasePower(bool isLaptop) {
 HardwareInfo HardwareDetect::DetectAll() {
     HardwareInfo info{};
 
+    info.isWsl = DetectIsWsl();
+
     info.cpuName = DetectCpuName();
     info.cpuCores = DetectCpuCores();
     info.cpuThreads = DetectCpuThreads();
     info.cpuDetected = !info.cpuName.empty();
-    info.cpuTdpWatts = EstimateCpuTdp(info.cpuName, info.cpuCores);
+
+    // Prefer the real package power limit reported by the device (RAPL),
+    // fall back to the lookup table / core-count heuristic.
+    double deviceCpuTdp = DetectCpuTdpFromDevice();
+    if (deviceCpuTdp > 0.0) {
+        info.cpuTdpWatts = deviceCpuTdp;
+        info.cpuTdpMeasured = true;
+    } else {
+        info.cpuTdpWatts = EstimateCpuTdp(info.cpuName, info.cpuCores);
+        info.cpuTdpMeasured = false;
+    }
 
     info.gpuName = DetectGpuName();
     info.gpuDetected = !info.gpuName.empty();
-    info.gpuTdpWatts = EstimateGpuTdp(info.gpuName);
+
+    // Prefer the real board power limit reported by the GPU driver.
+    double deviceGpuTdp = DetectGpuTdpFromDevice();
+    if (deviceGpuTdp > 0.0) {
+        info.gpuTdpWatts = deviceGpuTdp;
+        info.gpuTdpMeasured = true;
+        info.gpuDetected = true;
+        if (info.gpuName.empty()) info.gpuName = "GPU (driver-reported)";
+    } else {
+        info.gpuTdpWatts = EstimateGpuTdp(info.gpuName);
+        info.gpuTdpMeasured = false;
+    }
 
     info.isLaptop = DetectIsLaptop();
     info.laptopDetected = true;
@@ -461,19 +604,22 @@ void HardwareDetect::PrintDetectedHardware(const HardwareInfo& info) {
     if (info.cpuDetected) {
         std::cout << "  CPU:  " << info.cpuName << "\n";
         std::cout << "        " << info.cpuCores << " cores / " << info.cpuThreads << " threads\n";
-        std::cout << "        Estimated TDP: " << info.cpuTdpWatts << " W\n";
+        std::cout << "        TDP: " << info.cpuTdpWatts << " W"
+                  << (info.cpuTdpMeasured ? " (measured from device)" : " (estimated)") << "\n";
     } else {
         std::cout << "  CPU:  (not detected) - using estimate: " << info.cpuTdpWatts << " W\n";
     }
 
     if (info.gpuDetected) {
         std::cout << "  GPU:  " << info.gpuName << "\n";
-        std::cout << "        Estimated TDP: " << info.gpuTdpWatts << " W\n";
+        std::cout << "        TDP: " << info.gpuTdpWatts << " W"
+                  << (info.gpuTdpMeasured ? " (measured from driver)" : " (estimated)") << "\n";
     } else {
         std::cout << "  GPU:  (not detected) - using integrated estimate: " << info.gpuTdpWatts << " W\n";
     }
 
-    std::cout << "  Type: " << (info.isLaptop ? "Laptop" : "Desktop") << "\n";
+    std::cout << "  Type: " << (info.isLaptop ? "Laptop" : "Desktop")
+              << (info.isWsl ? " (WSL)" : "") << "\n";
     std::cout << "  Base: " << info.baseSystemWatts << " W (RAM, disks, fans)\n";
     std::cout << "\n  Use 'Configure system parameters' to override any value.\n";
 }

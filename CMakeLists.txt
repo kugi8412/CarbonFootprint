@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(CarbonFootprint VERSION 1.1.2 LANGUAGES CXX)
+project(CarbonFootprint VERSION 1.1.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +19,9 @@ set(SOURCES
 
 add_executable(carbon_tracker ${SOURCES})
 target_include_directories(carbon_tracker PRIVATE include)
+
+# Propagate the project version into the binary so the banner stays in sync.
+target_compile_definitions(carbon_tracker PRIVATE CARBON_VERSION="${PROJECT_VERSION}")
 
 # Platform-specific linking
 if(WIN32)

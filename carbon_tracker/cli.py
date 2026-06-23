@@ -9,12 +9,16 @@ import time
 import argparse
 
 from carbon_tracker import CarbonTracker, CarbonProject
+from carbon_tracker._version import __version__
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="carbon-tracker",
         description="Carbon Footprint Tracker - Monitor your computer's carbon emissions",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"carbon-tracker {__version__}"
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -82,22 +86,37 @@ def _cmd_monitor(args):
 
     tracker.start()
 
+    warned = False
     try:
         while True:
             time.sleep(5)
             snap = tracker.get_snapshot()
+
+            if not warned and snap["total_seconds"] >= 5:
+                warning = tracker.power_warning()
+                if warning:
+                    print(f"\n[!] {warning}\n")
+                else:
+                    print(
+                        f"\n[OK] Measured real power draw from "
+                        f"{snap['power_source']}.\n"
+                    )
+                warned = True
+
             elapsed = snap["total_seconds"]
             h, m, s = (
                 int(elapsed) // 3600,
                 (int(elapsed) % 3600) // 60,
                 int(elapsed) % 60,
             )
+            pwr = "battery" if not snap["power_estimated"] else "est"
             print(
                 f"\r  {h}h{m:02d}m{s:02d}s | "
                 f"CO2: {snap['total_carbon_grams']:.3f}g | "
                 f"Energy: {snap['total_energy_kwh'] * 1000:.4f}Wh | "
                 f"Grid: {snap['intensity']:.0f} gCO2/kWh"
-                f"{'*' if snap['intensity_real'] else ''}    ",
+                f"{'*' if snap['intensity_real'] else ''} | "
+                f"Pwr: {pwr}    ",
                 end="",
                 flush=True,
             )
@@ -130,13 +149,42 @@ def _cmd_project(args):
     elif args.action == "forecast":
         proj = CarbonProject.load(args.file)
         result = proj.project_future(args.hours)
-        print(f"Forecast for {result['projected_hours']:.1f} hours:")
+        method = result.get("method", "average")
+        print(f"Forecast for {result['projected_hours']:.1f} hours [{method}]:")
         print(f"  Projected CO2:    {result['projected_carbon_grams']:.2f} g")
+        if method == "gaussian_mixture":
+            print(
+                f"    95% range:      "
+                f"{result.get('carbon_low_grams', 0):.2f} - "
+                f"{result.get('carbon_high_grams', 0):.2f} g"
+            )
         print(f"  Projected Energy: {result['projected_energy_kwh'] * 1000:.2f} Wh")
         print(f"  Rate:             {result['rate_grams_per_hour']:.2f} gCO2/hour")
+        comps = result.get("carbon_components", [])
+        if len(comps) > 1:
+            modes = ", ".join(
+                f"{c['rate']:.1f} g/h ({c['weight'] * 100:.0f}%)" for c in comps
+            )
+            print(f"  Usage modes:      {modes}")
         print(
-            f"  Based on:         {result['based_on_sessions']} sessions ({result['based_on_hours']:.1f}h)"
+            f"  Based on:         {result['based_on_sessions']} sessions "
+            f"({result['based_on_hours']:.1f}h)"
         )
+
+        per_app = result.get("per_app", {})
+        if per_app:
+            print("  Per-app forecast (top 5 by CO2):")
+            top = sorted(
+                per_app.items(),
+                key=lambda x: -x[1]["projected_carbon_grams"],
+            )[:5]
+            for name, app in top:
+                print(
+                    f"    {name:25s} "
+                    f"CO2={app['projected_carbon_grams']:.2f}g  "
+                    f"(±{(app['rate_std_grams_per_hour'] * result['projected_hours']):.2f}g)  "
+                    f"Energy={app['projected_energy_kwh'] * 1000:.2f}Wh"
+                )
 
 
 def _cmd_detect():

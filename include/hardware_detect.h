@@ -20,6 +20,12 @@ struct HardwareInfo {
     bool cpuDetected;
     bool gpuDetected;
     bool laptopDetected;
+
+    // True when the TDP/power value was read directly from the device
+    // (RAPL power cap / GPU driver) rather than estimated from a lookup table.
+    bool cpuTdpMeasured;
+    bool gpuTdpMeasured;
+    bool isWsl;
 };
 
 class HardwareDetect {
@@ -30,10 +36,18 @@ public:
     static int DetectCpuCores();
     static int DetectCpuThreads();
     static double EstimateCpuTdp(const std::string& cpuName, int cores);
+    // Reads the real CPU package power limit from Intel/AMD RAPL (Linux powercap).
+    // Returns watts, or 0.0 when not available (Windows, macOS, most WSL setups).
+    static double DetectCpuTdpFromDevice();
 
     static std::string DetectGpuName();
     static double EstimateGpuTdp(const std::string& gpuName);
+    // Queries the real GPU board power limit from the driver (nvidia-smi / rocm-smi).
+    // Works on Windows, Linux and WSL2. Returns watts, or 0.0 when unavailable.
+    static double DetectGpuTdpFromDevice();
 
+    // True when running under Windows Subsystem for Linux.
+    static bool DetectIsWsl();
     static bool DetectIsLaptop();
     static double EstimateBasePower(bool isLaptop);
 

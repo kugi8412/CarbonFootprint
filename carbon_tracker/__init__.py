@@ -14,6 +14,7 @@ Usage:
 """
 
 from carbon_tracker.globals import *
+from carbon_tracker._version import __version__
 from carbon_tracker.tracker import CarbonTracker
 from carbon_tracker.project import CarbonProject
 from carbon_tracker.activities import Activity, ActivityTracker
@@ -24,7 +25,6 @@ from carbon_tracker.models import (
     HardwareInfo,
 )
 
-__version__ = "1.1.2"
 __all__ = [
     "CarbonTracker",
     "CarbonProject",

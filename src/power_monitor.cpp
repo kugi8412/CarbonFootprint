@@ -86,7 +86,7 @@ double PowerMonitor::GetGpuPower() {
     }
 #endif
 
-    // Estimate: GPU idles at ~10-20W, assume 15% of TDP at idle
+    // Estimate: GPU idles at 10-20W, assume 15% of TDP at idle
     // Without monitoring, we estimate moderate usage
     double idlePower = gpuTdpWatts_ * 0.15;
     return idlePower; // Conservative idle estimate when no NVML

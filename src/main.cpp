@@ -14,6 +14,10 @@
 
 static CarbonEngine* g_engine = nullptr;
 
+#ifndef CARBON_VERSION
+#define CARBON_VERSION "1.1.3"
+#endif
+
 static void PrintBanner() {
     std::cout << R"(
   ____            _                   _____           _             _       _
@@ -25,9 +29,9 @@ static void PrintBanner() {
    ______             __
   /_  __/______ _____/ /_____ ____
    / / / __/ _ `/ __/  '_/ -_) __/
-  /_/ /_/  \_,_/\__/_/\_\\__/_/     v1.1.2
-
-)" << std::endl;
+  /_/ /_/  \_,_/\__/_/\_\\__/_/     v)"
+              << CARBON_VERSION << "\n\n"
+              << std::endl;
 }
 
 // ============================================================

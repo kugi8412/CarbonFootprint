@@ -24,6 +24,17 @@ _CPU_TDP_TABLE = [
     ("i5-13.*H", 45),
     ("i9-14900H", 45),
     ("i9-13900H", 45),
+    # Intel 11th / 10th gen mobile (H = 45W, U = 15W)
+    ("i9-11.*H", 45),
+    ("i7-11.*H", 45),
+    ("i5-11.*H", 45),
+    ("i9-10.*H", 45),
+    ("i7-10.*H", 45),
+    ("i5-10.*H", 45),
+    ("i7-11.*U", 15),
+    ("i5-11.*U", 15),
+    ("i7-10.*U", 15),
+    ("i5-10.*U", 15),
     # Intel Desktop & Core Ultra
     ("Core Ultra 9.*K", 125),
     ("Core Ultra 7.*K", 125),
@@ -50,6 +61,21 @@ _CPU_TDP_TABLE = [
     ("i3-14", 60),
     ("i3-13", 60),
     ("i3-12", 60),
+    # Intel 11th / 10th gen desktop
+    ("i9-11900K", 125),
+    ("i7-11700K", 125),
+    ("i5-11600K", 125),
+    ("i9-10900K", 125),
+    ("i7-10700K", 125),
+    ("i5-10600K", 125),
+    ("i9-11", 65),
+    ("i7-11", 65),
+    ("i5-11", 65),
+    ("i3-11", 60),
+    ("i9-10", 65),
+    ("i7-10", 65),
+    ("i5-10", 65),
+    ("i3-10", 60),
     ("Xeon", 105),
     ("Pentium", 35),
     ("Celeron", 15),
@@ -105,6 +131,37 @@ _CPU_TDP_TABLE = [
 
 # GPU TDP lookup
 _GPU_TDP_TABLE = [
+    # NVIDIA laptop GPUs - MUST precede desktop entries because a name like
+    # "RTX 4070 Laptop GPU" also substring-matches the desktop "RTX 4070".
+    ("RTX 4090 Laptop", 150),
+    ("RTX 4080 Laptop", 150),
+    ("RTX 4070 Laptop", 115),
+    ("RTX 4060 Laptop", 100),
+    ("RTX 4050 Laptop", 75),
+    ("RTX 3080 Ti Laptop", 150),
+    ("RTX 3080 Laptop", 150),
+    ("RTX 3070 Ti Laptop", 125),
+    ("RTX 3070 Laptop", 125),
+    ("RTX 3060 Laptop", 115),
+    ("RTX 3050 Ti Laptop", 75),
+    ("RTX 3050 Laptop", 75),
+    ("RTX 2080 Laptop", 150),
+    ("RTX 2070 Laptop", 115),
+    ("RTX 2060 Laptop", 90),
+    # NVIDIA professional / workstation (RTX A-series and Ada)
+    ("RTX A5500", 165),
+    ("RTX A5000", 165),
+    ("RTX A4500", 120),
+    ("RTX A4000", 140),
+    ("RTX A3000", 90),
+    ("RTX A2000", 70),
+    ("RTX A1000", 50),
+    ("RTX A500", 35),
+    ("RTX 5000 Ada", 175),
+    ("RTX 4000 Ada", 130),
+    ("RTX 3500 Ada", 120),
+    ("RTX 3000 Ada", 90),
+    ("RTX 2000 Ada", 70),
     # NVIDIA RTX 50
     ("RTX 5090", 575),
     ("RTX 5080", 360),
@@ -485,3 +542,16 @@ PROJECTION_CPU_LOAD_ESTIMATE = 0.30
 MIN_SYSTEM_CPU_NOISE = 0.1
 ACTIVE_APP_ENERGY_TAX = 0.10
 BACKGROUND_APP_ENERGY_TAX = 0.02
+
+# How often to sample the battery for real power draw (seconds). Battery reads
+# can involve a subprocess (Windows/WSL/macOS), so they are throttled and cached.
+POWER_MEASURE_INTERVAL_SEC = 10.0
+
+# LibreHardwareMonitor / OpenHardwareMonitor built-in web server. When the app
+# is running with "Remote Web Server" enabled, it serves all sensors as JSON at
+# http://<host>:<port>/data.json. CarbonFootprint reads real CPU/GPU package
+# power from it (covers AMD/Intel GPUs too). Disabled cost is one short,
+# cached HTTP call per measurement interval.
+LHM_HTTP_HOST = "localhost"
+LHM_HTTP_PORT = 8085
+LHM_HTTP_TIMEOUT_SEC = 1.0

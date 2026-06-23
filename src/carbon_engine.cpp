@@ -100,7 +100,7 @@ void CarbonEngine::MonitorLoop() {
                 // Check browser tab filter - only count if the right tab is active
                 if (!MatchesBrowserTabFilter(target, windowTitle)) {
                     // Browser is running but wrong tab is active - attribute minimal energy
-                    // (background tab uses ~5% of what foreground does)
+                    // (background tab uses 5% of what foreground does)
                     if (IsTargetApp(activeApp)) {
                         // It's the foreground app but wrong tab - skip
                         continue;
@@ -259,7 +259,7 @@ const EngineConfig& CarbonEngine::GetConfig() const {
     return config_;
 }
 
-// --- Dynamic app management ---
+// Dynamic app management
 
 void CarbonEngine::AddApp(const std::string& appName) {
     std::lock_guard<std::mutex> lock(dataMutex_);
@@ -311,7 +311,7 @@ std::vector<std::string> CarbonEngine::GetActiveApps() {
     return config_.targetApps;
 }
 
-// --- Browser tab filter ---
+// Browser tab filter
 
 bool CarbonEngine::MatchesBrowserTabFilter(const std::string& appName, const std::string& windowTitle) {
     // Check if this app has a tab filter configured
@@ -378,7 +378,7 @@ std::vector<BrowserTabFilter> CarbonEngine::GetTabFilters() {
     return config_.tabFilters;
 }
 
-// --- Previous sessions & projection ---
+// Previous sessions & projection
 
 void CarbonEngine::AddPreviousSession(const PreviousSession& session) {
     std::lock_guard<std::mutex> lock(dataMutex_);

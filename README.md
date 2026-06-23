@@ -1,9 +1,9 @@
 # Carbon Footprint Tracker
 
-[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/version-1.1.3-brightgreen.svg)]()
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/carbon-footprint-tracker.svg)](https://pypi.org/project/carbon-footprint-tracker/)
+[![Carbon Footprint Tracker](https://raw.githubusercontent.com/kugi8412/CarbonFootprint/main/Carbon_Footprint_Tracker_Badge.svg)](https://pypi.org/project/carbon-footprint-tracker/)
 
 A cross-platform carbon footprint tracker that monitors your computer usage and calculates real-time CO₂ emissions per application. Available as a **Python library**, **CLI tool**, **desktop GUI**, and **native C++ application**.
 
@@ -32,7 +32,9 @@ A cross-platform carbon footprint tracker that monitors your computer usage and 
 ## Features
 
 - **Per-Process Tracking** - monitors CPU and GPU usage only for **selected processes**, not the entire system, keeping overhead minimal
-- **Auto-Detect Hardware** - automatically identifies your CPU/GPU and looks up TDP (thermal design power) values from built-in tables covering Intel, AMD, NVIDIA, and Apple Silicon
+- **Measured Power (not just estimates)** - reads *real* wattage where the hardware exposes it: whole-system draw from the **battery** (laptops on battery), **CPU package power** via Intel/AMD **RAPL** (Linux) or a **LibreHardwareMonitor**/OpenHardwareMonitor sensor (Windows), and **GPU power** via `nvidia-smi` or LibreHardwareMonitor. Falls back to a TDP estimate only for parts that can't be read - and **warns you** when it does.
+- **Auto-Detect Hardware** - identifies your CPU/GPU and detects TDP **directly from the device** when possible (RAPL power limits, `nvidia-smi`/`rocm-smi`), otherwise looks it up from built-in tables covering Intel, AMD, NVIDIA (incl. laptop and RTX A-series workstation GPUs), and Apple Silicon. Detects laptop vs desktop and **WSL**.
+- **Gaussian-Mixture Forecasting** - projects future carbon both for the whole system and **per application** using a dependency-free 1-D Gaussian Mixture model, capturing distinct usage modes with a 95% confidence range
 - **Browser Tab Filtering** - filter energy tracking to specific browser tabs by keyword (e.g., only count YouTube in Firefox)
 - **Real-Time Carbon Intensity** - fetches live grid carbon intensity from the [Electricity Maps API](https://www.electricitymaps.com/) with 40+ zone fallbacks
 - **Auto Country Detection** - detects your location via IP geolocation and maps it to the correct electricity zone
@@ -42,6 +44,8 @@ A cross-platform carbon footprint tracker that monitors your computer usage and 
 - **Desktop GUI** - full-featured PyQt5 GUI with dark theme, dashboard, app selector, project management, and forecast tools
 - **CLI Tool** - scriptable command-line interface for automation and CI/CD pipelines
 - **Native C++ Core** - high-performance C++ application with CMake build system
+
+> New here? See **[instruction.md](instruction.md)** for a short Windows / Linux / macOS / WSL start guide.
 
 ---
 
@@ -484,14 +488,34 @@ cmake .. -DUSE_CURL=ON    # libcurl for HTTP (alternative to WinHTTP)
 
 ### Power Model
 
-The tracker estimates power consumption using a layered model:
+The tracker prefers **measured** power and only estimates what the hardware
+won't report. It picks the best available source in this order:
 
-1. **CPU Power** = `idle_fraction × TDP × 0.15` + `load_fraction × TDP × usage%`
-2. **GPU Power** = `TDP × 0.10` (baseline, more when GPU-heavy apps are detected)
-3. **System Base** = 15W (display, RAM, storage, fans)
-4. **Laptop Adjustment** = 0.7× multiplier (power-saving design)
+1. **Battery discharge (whole system)** - while a laptop runs on battery, the
+   discharge rate *is* the real total wattage (CPU + GPU + screen + everything).
+   This is the gold standard, used directly with no heuristics.
+2. **Component sum (on AC)** - when plugged in, the battery reports no draw, so
+   the total is assembled from per-component sensors:
+   - **CPU package power** - Intel/AMD RAPL (Linux) or a LibreHardwareMonitor /
+     OpenHardwareMonitor sensor (Windows, via WMI or its `/data.json` web server).
+   - **GPU power** - `nvidia-smi power.draw`, or LibreHardwareMonitor for
+     AMD/Intel GPUs.
+   - **System base** - a small fixed offset for display, RAM, storage, fans.
+3. **TDP estimate (fallback)** - for any component without a sensor, power is
+   estimated from its TDP and CPU utilization with a single non-linear curve.
+   The app **flags the result as estimated** and tells you how to enable real
+   measurement (see [instruction.md](instruction.md)).
 
-Each app's share is proportional to its CPU usage, with an active-window bonus for the foreground app.
+Each app's share is proportional to its CPU usage, with an active-window bonus
+for the foreground app. The reported `power_source` shows exactly what was
+measured, e.g. `battery`, `components(cpu:meas,gpu:meas)`, or `estimate`.
+
+### Forecasting (Gaussian Mixture)
+
+Future carbon is projected with a dependency-free 1-D **Gaussian Mixture model**
+fit on per-hour usage samples - for the whole system and for **each application**
+separately. This captures multiple usage modes (e.g. idle vs. heavy compile)
+rather than a single average, and reports a 95% confidence interval.
 
 ### Carbon Calculation
 
@@ -595,15 +619,22 @@ CarbonFootprint/
 ├── MANIFEST.in                 # Package file inclusion rules
 ├── LICENSE                     # MIT License
 ├── README.md                   # This file
+├── instruction.md              # Quick start (Windows/Linux/macOS/WSL)
+├── PUBLISHING.md               # How to publish the package to PyPI
 ├── CMakeLists.txt              # C++ build config
 ├── build.bat                   # Windows C++ build script
 ├── build.sh                    # Linux/Mac C++ build script
 │
 ├── carbon_tracker/             # Python package
 │   ├── __init__.py             # Package entry point, exports
+│   ├── _version.py             # Single source of truth for the version
 │   ├── models.py               # Data models (HardwareInfo, SessionData, etc.)
-│   ├── hardware.py             # Auto-detect CPU/GPU + TDP lookup
+│   ├── globals.py              # Constants, TDP tables, config
+│   ├── hardware.py             # Auto-detect CPU/GPU + device/TDP lookup + WSL
+│   ├── power.py                # Measured power (battery, RAPL, nvidia-smi, LHM)
+│   ├── forecast.py             # Gaussian-Mixture forecasting (overall + per-app)
 │   ├── carbon_api.py           # Carbon intensity API + zone detection
+│   ├── activities.py           # Non-electrical activities API
 │   ├── tracker.py              # Core monitoring engine (psutil-based)
 │   ├── project.py              # Project file management (.carbon.json)
 │   ├── cli.py                  # CLI entry point (argparse)
@@ -790,7 +821,18 @@ A: No. The tracker has built-in fallback intensity values for 40+ zones. An API 
 A: Yes. Hardware detection, process monitoring, and active window detection all have cross-platform implementations.
 
 **Q: How accurate is the power estimation?**  
-A: It's an estimate based on TDP and CPU utilization. For precise measurements, use hardware power meters. The estimates are within +/- 30% for typical workloads.
+A: It depends on the source. On battery, or on AC with CPU/GPU sensors available
+(RAPL on Linux, LibreHardwareMonitor on Windows, `nvidia-smi`), power is
+**measured** and accurate to within a few percent. When a component has no
+sensor, it falls back to a TDP-based estimate (typically +/- 30%) and the app
+**warns you** that the value is estimated.
+
+**Q: I'm on AC power - why does it say "estimated"?**  
+A: A plugged-in battery reports no discharge, so whole-system wattage can't be
+read from it. The tracker then measures each component it can (GPU via
+`nvidia-smi`, CPU via RAPL/LibreHardwareMonitor) and estimates the rest. To get
+real CPU power on Windows, run **LibreHardwareMonitor**; on Linux RAPL works out
+of the box. See [instruction.md](instruction.md#5-get-real-measured-power-optional).
 
 **Q: Can I track GPU-heavy workloads?**  
 A: The tracker includes GPU TDP in calculations. For NVIDIA GPUs, the C++ version can use NVML for real power readings.

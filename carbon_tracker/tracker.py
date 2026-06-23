@@ -7,7 +7,7 @@ Core Carbon Footprint Tracker.
 
 import time
 import threading
-from typing import Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable
 
 import psutil
 
@@ -19,6 +19,12 @@ from carbon_tracker.models import (
     BrowserTabFilter,
 )
 from carbon_tracker.hardware import detect_hardware
+from carbon_tracker.power import (
+    read_system_power_watts,
+    read_gpu_power_draw,
+    read_cpu_power_watts,
+    read_battery_status,
+)
 from carbon_tracker.carbon_api import (
     auto_detect_zone,
     fetch_carbon_intensity,
@@ -38,6 +44,7 @@ from carbon_tracker.globals import (
     PROJECTION_CPU_LOAD_ESTIMATE,
     MIN_SYSTEM_CPU_NOISE,
     BACKGROUND_APP_ENERGY_TAX,
+    POWER_MEASURE_INTERVAL_SEC,
 )
 
 
@@ -80,7 +87,7 @@ def _get_active_window_process() -> tuple:
                 try:
                     ps_cmd = (
                         "$fw = (Add-Type -MemberDefinition '"
-                        '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();\'  '
+                        "[DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();'  "
                         "-Name 'Win32' -Namespace 'Native' -PassThru)::GetForegroundWindow();"
                         "$p = Get-Process | Where-Object { $_.MainWindowHandle -eq $fw } | Select-Object -First 1;"
                         "if($p){ $p.ProcessName + '|' + $p.MainWindowTitle }"
@@ -94,12 +101,7 @@ def _get_active_window_process() -> tuple:
                     if "|" in out:
                         parts = out.split("|", 1)
                         return (parts[0].strip() + ".exe", parts[1].strip())
-                except (
-                    FileNotFoundError,
-                    subprocess.TimeoutExpired,
-                    subprocess.CalledProcessError,
-                    OSError,
-                ):
+                except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
                     pass
                 return ("", "")
 
@@ -138,24 +140,62 @@ def _get_active_window_process() -> tuple:
     return ("", "")
 
 
-def _get_process_cpu_percent(names: List[str]) -> Dict[str, float]:
-    """Get CPU usage for each process name. Sums across all PIDs."""
+def _scan_processes_cached(
+    names: List[str],
+    cache: Dict[int, list],
+    wsl_state: Optional[Dict[str, Any]] = None,
+) -> tuple:
+    """Return ``(per_name_cpu, running)`` using a persistent PID cache.
+
+    Enumerating process *names* through psutil opens a handle per process and
+    is very slow on Windows (~1 s for hundreds of processes). Instead we list
+    PIDs (instant), resolve a name only the first time a PID appears, and keep
+    the ``Process`` object in ``cache`` so ``cpu_percent`` deltas work across
+    ticks. Steady-state cost is therefore proportional to the number of *new*
+    processes per tick, not the total process count.
+    """
     result = {n: 0.0 for n in names}
+    running = set()
     lower_names = {n.lower().replace(".exe", ""): n for n in names}
 
     # On WSL, also check Windows processes
     if _is_wsl():
-        _get_wsl_windows_cpu(result, lower_names)
+        if wsl_state is None:
+            wsl_state = {}
+        _get_wsl_windows_cpu(result, lower_names, running, wsl_state)
 
-    for proc in psutil.process_iter(["name", "cpu_percent"]):
-        try:
-            pname = (proc.info["name"] or "").lower().replace(".exe", "")
-            if pname in lower_names:
-                result[lower_names[pname]] += proc.info["cpu_percent"] or 0.0
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+    current = set(psutil.pids())
+
+    # Forget processes that have exited.
+    for pid in [p for p in cache if p not in current]:
+        del cache[pid]
+
+    for pid in current:
+        entry = cache.get(pid)
+        if entry is None:
+            # New PID: resolve its name once (the expensive part) and prime CPU.
+            try:
+                proc = psutil.Process(pid)
+                name_lower = (proc.name() or "").lower().replace(".exe", "")
+                proc.cpu_percent(interval=0)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                cache[pid] = None  # remember as unreadable; skip cheaply next time
+                continue
+            entry = [name_lower, proc]
+            cache[pid] = entry
+        if entry is None:
             continue
 
-    return result
+        name_lower, proc = entry
+        canonical = lower_names.get(name_lower)
+        if canonical is not None:
+            running.add(name_lower)
+            try:
+                result[canonical] += proc.cpu_percent(interval=0) or 0.0
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+    return result, running
 
 
 def _is_wsl() -> bool:
@@ -172,16 +212,34 @@ def _is_wsl() -> bool:
     return _is_wsl._cached
 
 
-def _get_wsl_windows_cpu(result: Dict[str, float], lower_names: Dict[str, str]):
-    """Query Windows process CPU usage from WSL via tasklist/powershell."""
+def _get_wsl_windows_cpu(
+    result: Dict[str, float],
+    lower_names: Dict[str, str],
+    running: set,
+    wsl_state: Dict[str, Any],
+):
+    """Measure real Windows-host process CPU% from WSL via ``powershell.exe``.
+
+    ``Get-Process`` reports cumulative CPU *seconds* per process. We sample the
+    per-name total once per tick and divide the delta by the elapsed wall-clock
+    time to obtain an instantaneous percentage on the same scale as psutil's
+    per-process ``cpu_percent`` (relative to a single core, so a process
+    saturating N cores reports ``N * 100``). The summed delta across *all*
+    processes, normalised by the host's logical-processor count, also yields the
+    Windows-host system CPU% (0-100, like ``psutil.cpu_percent``), stored in
+    ``wsl_state["system_cpu"]`` so the monitor loop can use it as the energy
+    allocation reference instead of the WSL VM's CPU. The first sample only
+    primes the baseline, so accurate values appear from the second tick onward.
+    """
     import subprocess
 
     try:
-        # Use powershell.exe to get process CPU via Get-Process
+        # Emit the host logical-processor count first, then one row per process
+        # name with its summed cumulative CPU seconds.
         ps_cmd = (
-            "Get-Process | "
-            "Select-Object ProcessName, CPU | "
-            "ForEach-Object { $_.ProcessName + '|' + $_.CPU }"
+            "'##NCPU|' + [Environment]::ProcessorCount; "
+            "Get-Process | Group-Object ProcessName | ForEach-Object { "
+            "$_.Name + '|' + (($_.Group | Measure-Object CPU -Sum).Sum) }"
         )
         out = subprocess.check_output(
             ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
@@ -189,22 +247,76 @@ def _get_wsl_windows_cpu(result: Dict[str, float], lower_names: Dict[str, str]):
             stderr=subprocess.DEVNULL,
             timeout=5,
         )
-        for line in out.strip().splitlines():
-            parts = line.strip().split("|")
-            if len(parts) == 2:
-                pname = parts[0].strip().lower()
-                if pname in lower_names:
-                    # Get-Process CPU is total CPU time in seconds, not percent
-                    # Mark as running with minimal value so it gets tracked
-                    if result[lower_names[pname]] == 0.0:
-                        result[lower_names[pname]] = 0.1
     except (
         FileNotFoundError,
         subprocess.TimeoutExpired,
         subprocess.CalledProcessError,
         OSError,
     ):
-        pass
+        return
+
+    now = time.time()
+    current: Dict[str, float] = {}
+    for line in out.strip().splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 2:
+            continue
+        key = parts[0].strip().lower()
+        if key == "##ncpu":
+            try:
+                ncpu = int(parts[1])
+                if ncpu > 0:
+                    wsl_state["ncpu"] = ncpu
+            except ValueError:
+                pass
+            continue
+        try:
+            current[key] = float(parts[1])
+        except ValueError:
+            continue  # null CPU (e.g. protected system process)
+
+    prev = wsl_state.get("procs")
+    prev_ts = wsl_state.get("ts", 0.0)
+    wsl_state["procs"] = current
+    wsl_state["ts"] = now
+
+    # Any present tracked process counts as running, even at 0% CPU.
+    for pname, canonical in lower_names.items():
+        if pname in current:
+            running.add(pname)
+
+    # First sample only primes the baseline; no delta available yet.
+    if not prev:
+        return
+    elapsed = now - prev_ts
+    if elapsed <= 0:
+        return
+
+    for pname, canonical in lower_names.items():
+        cur = current.get(pname)
+        old = prev.get(pname)
+        if cur is None or old is None:
+            continue
+        delta = cur - old
+        if delta < 0:
+            delta = 0.0  # process restarted; cumulative counter reset
+        percent = (delta / elapsed) * PERCENT_MAX
+        if percent > result[canonical]:
+            result[canonical] = percent
+
+    # Windows-host system CPU% from the summed delta across all processes,
+    # normalised by logical cores (matches psutil.cpu_percent scale: 0-100).
+    ncpu = wsl_state.get("ncpu") or psutil.cpu_count() or 1
+    total_delta = 0.0
+    for pname, cur in current.items():
+        old = prev.get(pname)
+        if old is None:
+            continue  # newly seen this tick; no comparable baseline
+        d = cur - old
+        if d > 0:
+            total_delta += d
+    system_cpu = (total_delta / elapsed / ncpu) * PERCENT_MAX
+    wsl_state["system_cpu"] = min(max(system_cpu, 0.0), PERCENT_MAX)
 
 
 class CarbonTracker:
@@ -264,6 +376,23 @@ class CarbonTracker:
         self._intensity_real = False
         self._previous_sessions: List[SessionData] = []
 
+        # Power measurement state. When the battery exposes a discharge rate we
+        # use that real wattage; otherwise we fall back to a TDP estimate and
+        # flag it so the user can be warned.
+        self._power_source: Optional[str] = None
+        self._power_estimated = True
+        self._measured_watts: Optional[float] = None
+        self._measured_gpu_watts: Optional[float] = None
+        self._measured_cpu_watts: Optional[float] = None
+        self._cpu_power_source: Optional[str] = None
+        self._battery_status: dict = {}
+        self._has_nvidia = "nvidia" in (self.hardware.gpu_name or "").lower()
+        self._last_power_read = 0.0
+        # PID -> [name_lower, psutil.Process] cache for the monitor loop.
+        self._proc_cache: Dict[int, list] = {}
+        # Persistent CPU-seconds baseline for WSL -> Windows process sampling.
+        self._wsl_cpu_state: Dict[str, Any] = {}
+
     # Public API
     def start(self):
         """Start monitoring."""
@@ -272,10 +401,6 @@ class CarbonTracker:
 
         self._running = True
         self._start_time = time.time()
-
-        # Prime CPU percent for psutil
-        for _ in psutil.process_iter(["cpu_percent"]):
-            pass
 
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
@@ -326,6 +451,8 @@ class CarbonTracker:
                 "intensity": self._intensity,
                 "intensity_real": self._intensity_real,
                 "zone": self.zone,
+                "power_source": self._power_source,
+                "power_estimated": self._power_estimated,
                 "apps": {k: v.to_dict() for k, v in self._app_data.items()},
                 "monitored_apps": list(self.apps),
             }
@@ -339,6 +466,99 @@ class CarbonTracker:
 
     def import_session(self, session: SessionData):
         self._previous_sessions.append(session)
+
+    def power_warning(self) -> Optional[str]:
+        """Return a user-facing warning when power is estimated, else None."""
+        if not self._power_estimated:
+            return None
+        st = self._battery_status or read_battery_status()
+        measured = []
+        if self._measured_cpu_watts:
+            measured.append("CPU")
+        if self._measured_gpu_watts:
+            measured.append("GPU")
+        meas = (" " + "+".join(measured) + " measured directly;") if measured else ""
+        if st.get("present") and not st.get("discharging"):
+            return (
+                "On AC power: the battery is not discharging, so whole-system "
+                "wattage can't be read from it." + meas + " remaining components are "
+                "TDP-estimated. Unplug to measure everything from the battery, or "
+                "run LibreHardwareMonitor (Windows) / use RAPL (Linux) for real "
+                "CPU power."
+            )
+        if not st.get("present"):
+            return (
+                "No battery detected (desktop/unsupported):" + meas + " remaining "
+                "components use a TDP estimate. Values are approximate."
+            )
+        return (
+            "Power is partly ESTIMATED from TDP heuristics." + meas
+            + " Values are approximate."
+        )
+
+    def _compute_total_watts(self, system_cpu: float, now: float) -> float:
+        """Total system watts.
+
+        Priority: (1) the battery's real discharge rate (whole-system, the gold
+        standard, only available while running on battery); (2) on AC, the sum
+        of measured components - real GPU draw (nvidia-smi) and real CPU package
+        power (RAPL / hardware sensor) - estimating only what can't be read.
+        """
+        # Throttle device reads (some spawn a subprocess) and cache them. Keyed
+        # on the timestamp, not on _measured_watts (which stays None on AC and
+        # would otherwise force a refresh every tick).
+        if (
+            self._last_power_read == 0.0
+            or (now - self._last_power_read) >= POWER_MEASURE_INTERVAL_SEC
+        ):
+            # Battery state is cheap (ctypes/sysfs); only pay for the slower
+            # whole-system discharge read when the battery is actually draining.
+            self._battery_status = read_battery_status()
+            if self._battery_status.get("discharging"):
+                watts, source = read_system_power_watts()
+            else:
+                watts, source = None, None
+            self._measured_watts = watts
+            self._power_source = source
+            # Real GPU draw only when an NVIDIA GPU is present (else LHM/estimate).
+            self._measured_gpu_watts = (
+                read_gpu_power_draw() if self._has_nvidia else None
+            )
+            self._measured_cpu_watts, self._cpu_power_source = read_cpu_power_watts()
+            self._last_power_read = now
+
+        # 1) Best: whole-system battery discharge (covers CPU+GPU+screen+rest).
+        if self._measured_watts and self._measured_watts > 0:
+            self._power_estimated = False
+            self._power_source = self._power_source or "battery"
+            return self._measured_watts
+
+        # 2) On AC: assemble the total from per-component measurements, using the
+        #    TDP curve only for parts the hardware won't report.
+        cpu_measured = bool(self._measured_cpu_watts and self._measured_cpu_watts > 0)
+        if cpu_measured:
+            cpu_watts = self._measured_cpu_watts
+        else:
+            cpu_idle = self.hardware.cpu_tdp_watts * CPU_IDLE_FRACTION
+            cpu_usage_frac = min(system_cpu / PERCENT_MAX, API_SLEEP_TICK_SEC)
+            cpu_watts = cpu_idle + (self.hardware.cpu_tdp_watts - cpu_idle) * (
+                cpu_usage_frac**CPU_POWER_CURVE_EXPONENT
+            )
+
+        gpu_measured = bool(self._measured_gpu_watts and self._measured_gpu_watts > 0)
+        if gpu_measured:
+            gpu_watts = self._measured_gpu_watts
+        else:
+            gpu_watts = self.hardware.gpu_tdp_watts * GPU_IDLE_FRACTION
+
+        # Considered "measured" when both dominant dynamic components are real;
+        # the base/display offset is a small fixed term.
+        self._power_estimated = not (cpu_measured and gpu_measured)
+        self._power_source = "components(cpu:{},gpu:{})".format(
+            "meas" if cpu_measured else "est",
+            "meas" if gpu_measured else "est",
+        )
+        return cpu_watts + gpu_watts + self.hardware.base_system_watts
 
     def project_future(self, hours: float) -> ProjectionResult:
         with self._lock:
@@ -405,26 +625,20 @@ class CarbonTracker:
                 with self._lock:
                     apps_to_track = list(self.apps)
 
-                per_app_cpu = _get_process_cpu_percent(apps_to_track)
+                per_app_cpu, running_procs = _scan_processes_cached(
+                    apps_to_track, self._proc_cache, self._wsl_cpu_state
+                )
                 total_tracked_cpu = sum(per_app_cpu.values())
 
-                # Build set of running process names (once per tick)
-                running_procs = set()
-                for proc in psutil.process_iter(["name"]):
-                    try:
-                        n = (proc.info["name"] or "").lower().replace(".exe", "")
-                        running_procs.add(n)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
+                # On WSL, prefer the Windows-host system CPU% (derived from the
+                # same Get-Process sampling) so per-app energy allocation matches
+                # the host the tracked processes actually run on, not the VM.
+                wsl_sys_cpu = self._wsl_cpu_state.get("system_cpu")
+                if wsl_sys_cpu is not None:
+                    system_cpu = wsl_sys_cpu
 
-                # Power estimation
-                cpu_idle = self.hardware.cpu_tdp_watts * CPU_IDLE_FRACTION
-                cpu_usage_frac = min(system_cpu / PERCENT_MAX, API_SLEEP_TICK_SEC)
-                cpu_watts = cpu_idle + (self.hardware.cpu_tdp_watts - cpu_idle) * (
-                    cpu_usage_frac**CPU_POWER_CURVE_EXPONENT
-                )
-                gpu_watts = self.hardware.gpu_tdp_watts * GPU_IDLE_FRACTION
-                total_watts = cpu_watts + gpu_watts + self.hardware.base_system_watts
+                # Power: measured from the battery when available, else estimated.
+                total_watts = self._compute_total_watts(system_cpu, time.time())
 
                 time_hours = self.update_interval / SECONDS_PER_HOUR
                 total_energy = (total_watts / WATTS_PER_KW) * time_hours
@@ -534,8 +748,7 @@ class CarbonTracker:
             session.hardware = self.hardware
             # Only include apps that have actual recorded data
             session.apps = {
-                k: v
-                for k, v in self._app_data.items()
+                k: v for k, v in self._app_data.items()
                 if v.total_active_seconds > 0 or v.total_carbon_grams > 0
             }
             return session

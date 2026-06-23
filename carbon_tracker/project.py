@@ -152,20 +152,35 @@ class CarbonProject:
         return totals
 
     def project_future(self, hours: float) -> dict:
-        """Project future carbon cost based on historical data."""
-        rate = self.carbon_per_hour()
-        energy_hours = self.total_duration_hours()
-        energy_rate = (
-            self.total_energy_kwh() / energy_hours if energy_hours > 0.001 else 0.0
-        )
-        return {
-            "projected_hours": hours,
-            "projected_carbon_grams": rate * hours,
-            "projected_energy_kwh": energy_rate * hours,
-            "rate_grams_per_hour": rate,
-            "based_on_sessions": len(self.sessions),
-            "based_on_hours": energy_hours,
-        }
+        """Project future carbon cost using a Gaussian Mixture Model over the
+        distribution of historical hourly rates (overall and per app).
+
+        Falls back to a simple average rate when there is not enough data.
+        Keeps the original keys for backward compatibility and adds GMM extras
+        (uncertainty range, mixture components, per-app forecasts).
+        """
+        from carbon_tracker.forecast import forecast_project
+
+        result = forecast_project(self.sessions, hours)
+
+        # Backward-compatible fields expected by existing CLI/GUI callers.
+        result.setdefault("projected_hours", hours)
+        result.setdefault("based_on_sessions", len(self.sessions))
+        if result.get("method") == "none" or result.get("n_samples", 0) == 0:
+            # No usable distribution: fall back to a plain average rate.
+            rate = self.carbon_per_hour()
+            energy_hours = self.total_duration_hours()
+            energy_rate = (
+                self.total_energy_kwh() / energy_hours if energy_hours > 0.001 else 0.0
+            )
+            result["method"] = "average"
+            result["projected_carbon_grams"] = rate * hours
+            result["projected_energy_kwh"] = energy_rate * hours
+            result["rate_grams_per_hour"] = rate
+            result["carbon_low_grams"] = rate * hours
+            result["carbon_high_grams"] = rate * hours
+            result["based_on_hours"] = energy_hours
+        return result
 
     def summary(self) -> str:
         lines = [
