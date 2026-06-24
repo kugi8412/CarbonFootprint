@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/badge/version-1.1.3-brightgreen.svg)]()
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Carbon Footprint Tracker](https://raw.githubusercontent.com/kugi8412/CarbonFootprint/main/Carbon_Footprint_Tracker_Badge.svg)](https://pypi.org/project/carbon-footprint-tracker/)
+[![Carbon Footprint Tracker](https://raw.githubusercontent.com/kugi8412/CarbonFootprint/main/Baner_CarbonFootprint.png)](https://pypi.org/project/carbon-footprint-tracker/)
 
 A cross-platform carbon footprint tracker that monitors your computer usage and calculates real-time CO₂ emissions per application. Available as a **Python library**, **CLI tool**, **desktop GUI**, and **native C++ application**.
 
