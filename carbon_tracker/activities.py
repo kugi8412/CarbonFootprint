@@ -308,8 +308,7 @@ class ActivityTracker:
         """Remove all activities."""
         self.activities.clear()
 
-    # ---- Aggregation ----
-
+    # Aggregation
     def total_co2_grams(self) -> float:
         """Total CO2 across all activities in grams."""
         return sum(a.co2_grams for a in self.activities)
@@ -336,8 +335,7 @@ class ActivityTracker:
             "beef_kg_equivalent": total / 27000.0,
         }
 
-    # ---- Reporting ----
-
+    # Reporting
     def report(self) -> str:
         """Generate a human-readable carbon footprint report."""
         lines = []
@@ -383,8 +381,6 @@ class ActivityTracker:
         lines.append("=" * 60)
 
         return "\n".join(lines)
-
-    # ---- Persistence ----
 
     def save(self, filepath: str):
         """Save activities to a JSON file."""

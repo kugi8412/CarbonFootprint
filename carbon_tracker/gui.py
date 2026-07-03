@@ -542,6 +542,7 @@ class CarbonTrackerGUI(QMainWindow):
             import psutil
 
             procs = set()
+            # Windows kernel save
             _ignore = {
                 "system",
                 "idle",

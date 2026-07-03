@@ -14,20 +14,20 @@ bool HardwareDetect::ContainsIgnoreCase(const std::string& haystack, const std::
 // CPU TDP Lookup Table
 const std::vector<HardwareDetect::CpuTdpEntry>& HardwareDetect::GetCpuTdpTable() {
     static const std::vector<CpuTdpEntry> table = {
-        // --- Intel Desktop K/KF (full SKU, most specific) ---
+        // Intel Desktop K/KF
         {"i9-14900K", 125}, {"i9-13900K", 125}, {"i9-12900K", 125}, {"i9-11900K", 125}, {"i9-10900K", 125},
         {"i7-14700K", 125}, {"i7-13700K", 125}, {"i7-12700K", 125}, {"i7-11700K", 125}, {"i7-10700K", 125},
         {"i5-14600K", 125}, {"i5-13600K", 125}, {"i5-12600K", 125}, {"i5-11600K", 125}, {"i5-10600K", 125},
-        // --- Intel Mobile HX (55W) ---
+        // Intel Mobile HX (55W)
         {"i9-14900HX", 55}, {"i9-13950HX", 55}, {"i9-13900HX", 55}, {"i7-14700HX", 55}, {"i7-13700HX", 55},
-        // --- Intel Mobile H (45W, full SKU incl. 11th/10th gen) ---
+        // Intel Mobile H (45W, full SKU incl. 11th/10th gen)
         {"i9-11900H", 45}, {"i7-11850H", 45}, {"i7-11800H", 45}, {"i7-11375H", 35}, {"i5-11400H", 45}, {"i5-11260H", 45},
         {"i9-10980HK", 45}, {"i7-10870H", 45}, {"i7-10750H", 45}, {"i5-10500H", 45}, {"i5-10300H", 45},
-        // --- Intel Desktop non-K (65W, full SKU) ---
+        // Intel Desktop non-K (65W, full SKU)
         {"i9-14900", 65}, {"i9-13900", 65}, {"i9-12900", 65},
         {"i7-14700", 65}, {"i7-13700", 65}, {"i7-12700", 65},
         {"i5-14600", 65}, {"i5-14400", 65}, {"i5-13600", 65}, {"i5-13400", 65}, {"i5-12400", 65},
-        // --- Intel generic by generation (fallback) ---
+        // Intel generic by generation (old version fallback)
         {"i9-14", 45}, {"i7-14", 28}, {"i5-14", 28},
         {"i9-13", 45}, {"i7-13", 28}, {"i5-13", 28},
         {"i7-12", 28}, {"i5-12", 28},

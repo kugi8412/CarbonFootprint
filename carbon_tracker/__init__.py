@@ -1,3 +1,6 @@
+#! /usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
 Carbon Footprint Tracker - Python Library
 
@@ -24,6 +27,14 @@ from carbon_tracker.models import (
     ProjectionResult,
     HardwareInfo,
 )
+from carbon_tracker.hpc import (
+    HPCJobInfo,
+    HPCReport,
+    detect_scheduler,
+    detect_hpc_job,
+    build_hpc_report,
+    run_and_measure,
+)
 
 __all__ = [
     "CarbonTracker",
@@ -34,4 +45,10 @@ __all__ = [
     "SessionData",
     "ProjectionResult",
     "HardwareInfo",
+    "HPCJobInfo",
+    "HPCReport",
+    "detect_scheduler",
+    "detect_hpc_job",
+    "build_hpc_report",
+    "run_and_measure",
 ]

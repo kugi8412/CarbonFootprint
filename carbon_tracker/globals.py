@@ -222,6 +222,55 @@ _GPU_TDP_TABLE = [
 ]
 
 # ============================================================
+# DATA-CENTER / HPC ACCELERATOR TDP (board power, watts)
+# Used when a job runs on a shared compute node where the consumer GPU table
+# above does not apply. Ordered most-specific first.
+# ============================================================
+_HPC_GPU_TDP_TABLE = [
+    # NVIDIA data-center (Hopper / Blackwell)
+    ("GB200", 1200),
+    ("B200", 1000),
+    ("B100", 700),
+    ("H200", 700),
+    ("H100", 700),
+    ("H800", 350),
+    ("GH200", 1000),
+    # NVIDIA Ampere
+    ("A100", 400),
+    ("A800", 400),
+    ("A40", 300),
+    ("A30", 165),
+    ("A10", 150),
+    ("A16", 250),
+    # NVIDIA Ada / Lovelace data-center
+    ("L40S", 350),
+    ("L40", 300),
+    ("L4", 72),
+    # NVIDIA Volta / Pascal / Turing data-center
+    ("V100", 300),
+    ("P100", 250),
+    ("P40", 250),
+    ("T4", 70),
+    ("K80", 300),
+    ("K40", 235),
+    # AMD Instinct
+    ("MI300X", 750),
+    ("MI300A", 760),
+    ("MI250X", 560),
+    ("MI250", 560),
+    ("MI210", 300),
+    ("MI100", 300),
+    ("MI50", 300),
+    # Intel Data Center GPU
+    ("Max 1550", 600),
+    ("Max 1100", 300),
+    # Google / generic accelerators (approximate board power)
+    ("TPU v4", 200),
+    ("TPU v3", 220),
+    ("TPU v2", 280),
+]
+
+# ============================================================
 # EMISSION FACTORS
 # https://ourworldindata.org/environmental-impacts-of-food
 # https://www.gov.uk/government/collections/government-conversion-factors-for-company-reporting
@@ -555,3 +604,37 @@ POWER_MEASURE_INTERVAL_SEC = 10.0
 LHM_HTTP_HOST = "localhost"
 LHM_HTTP_PORT = 8085
 LHM_HTTP_TIMEOUT_SEC = 1.0
+
+# ==========================================
+# HPC / cluster (SLURM, PBS, LSF, SGE) estimation constants
+# Methodology follows the Green Algorithms model (green-algorithms.org):
+#   energy_kWh = time_h * (n_cores * P_core * u_core
+#                          + n_gpus * P_gpu * u_gpu
+#                          + mem_GB * P_mem) * PUE / 1000
+# ==========================================
+
+# Data-center Power Usage Effectiveness: a real facility draws more than the IT
+# load for cooling, power delivery, etc. 1.0 = perfect, ~1.5-1.6 world average.
+HPC_DEFAULT_PUE = 1.5
+
+# Fallback per-core CPU power (W) when the CPU model / TDP is unknown. Server
+# CPUs draw roughly 6-12 W per physical core at full load.
+HPC_DEFAULT_WATTS_PER_CORE = 9.0
+
+# Fallback per-accelerator power (W) when the GPU model is unknown but GPUs are
+# allocated (typical data-center accelerator).
+HPC_DEFAULT_GPU_WATTS = 300.0
+
+# Memory power draw per allocated GB (Green Algorithms constant).
+HPC_MEM_WATTS_PER_GB = 0.3725
+
+# Default utilisation assumptions when real usage is unknown (0..1). HPC batch
+# jobs are typically sized to run their cores/GPUs hot, so default to full load.
+HPC_DEFAULT_CPU_UTILIZATION = 1.0
+HPC_DEFAULT_GPU_UTILIZATION = 1.0
+
+# How often the `hpc run` wrapper samples power while measuring (seconds).
+HPC_SAMPLE_INTERVAL_SEC = 5.0
+
+# Joules per kWh, for converting SLURM ``ConsumedEnergy`` (J) to kWh.
+JOULES_PER_KWH = 3_600_000.0

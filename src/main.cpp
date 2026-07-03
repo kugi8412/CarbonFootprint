@@ -15,7 +15,7 @@
 static CarbonEngine* g_engine = nullptr;
 
 #ifndef CARBON_VERSION
-#define CARBON_VERSION "1.1.3"
+#define CARBON_VERSION "1.1.4"
 #endif
 
 static void PrintBanner() {

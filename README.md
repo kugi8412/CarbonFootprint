@@ -1,11 +1,11 @@
 # Carbon Footprint Tracker
 
-[![Version](https://img.shields.io/badge/version-1.1.3-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/version-1.1.4-brightgreen.svg)]()
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Carbon Footprint Tracker](https://raw.githubusercontent.com/kugi8412/CarbonFootprint/main/Baner_CarbonFootprint.png)](https://pypi.org/project/carbon-footprint-tracker/)
 
-A cross-platform carbon footprint tracker that monitors your computer usage and calculates real-time CO₂ emissions per application. Available as a **Python library**, **CLI tool**, **desktop GUI**, and **native C++ application**.
+
+A cross-platform carbon footprint tracker that monitors your computer usage and calculates real-time CO2 emissions per application. Available as a **Python library**, **CLI tool**, **desktop GUI**, and **native C++ application**.
 
 ---
 
@@ -15,6 +15,7 @@ A cross-platform carbon footprint tracker that monitors your computer usage and 
 - [Quick Start](#quick-start)
 - [Python Library Usage](#python-library-usage)
 - [CLI Reference](#cli-reference)
+- [HPC / Cluster Jobs (SLURM, PBS, LSF, SGE)](#hpc--cluster-jobs-slurm-pbs-lsf-sge)
 - [GUI Application](#gui-application)
 - [Project Files (.carbon.json)](#project-files-carbonjson)
 - [C++ Application](#c-application)
@@ -36,6 +37,7 @@ A cross-platform carbon footprint tracker that monitors your computer usage and 
 - **Auto-Detect Hardware** - identifies your CPU/GPU and detects TDP **directly from the device** when possible (RAPL power limits, `nvidia-smi`/`rocm-smi`), otherwise looks it up from built-in tables covering Intel, AMD, NVIDIA (incl. laptop and RTX A-series workstation GPUs), and Apple Silicon. Detects laptop vs desktop and **WSL**.
 - **Gaussian-Mixture Forecasting** - projects future carbon both for the whole system and **per application** using a dependency-free 1-D Gaussian Mixture model, capturing distinct usage modes with a 95% confidence range
 - **Browser Tab Filtering** - filter energy tracking to specific browser tabs by keyword (e.g., only count YouTube in Firefox)
+- **HPC / Cluster Jobs** - measure or estimate the footprint of batch jobs on **SLURM, PBS/Torque, LSF and SGE**. Reads the resources a job was allocated (nodes, cores, GPUs, memory), uses SLURM `sacct` energy accounting or RAPL/`nvidia-smi` when available, and otherwise emits a transparent **manual-computation worksheet** (time + hardware + formula) so the cost can be recomputed by hand.
 - **Real-Time Carbon Intensity** - fetches live grid carbon intensity from the [Electricity Maps API](https://www.electricitymaps.com/) with 40+ zone fallbacks
 - **Auto Country Detection** - detects your location via IP geolocation and maps it to the correct electricity zone
 - **Auto Report on Stop** - when you stop monitoring (GUI or API), a JSON report is automatically saved with full session data
@@ -45,13 +47,13 @@ A cross-platform carbon footprint tracker that monitors your computer usage and 
 - **CLI Tool** - scriptable command-line interface for automation and CI/CD pipelines
 - **Native C++ Core** - high-performance C++ application with CMake build system
 
-> New here? See **[instruction.md](instruction.md)** for a short Windows / Linux / macOS / WSL start guide.
+> New here? See **[instruction.md](https://github.com/kugi8412/CarbonFootprint/blob/main/instruction.md)** for a short Windows / Linux / macOS / WSL start guide.
 
 ---
 
 ## Quick Start
 
-### Option A — Install as Python Library (recommended)
+### Option A - Install as Python Library (recommended)
 
 ```bash
 pip install carbon-footprint-tracker
@@ -72,7 +74,7 @@ session = tracker.get_session_data()
 print(session.summary())
 ```
 
-### Option B — GUI Application
+### Option B - GUI Application
 
 ```bash
 pip install carbon-footprint-tracker[gui]
@@ -80,13 +82,13 @@ carbon-tracker-gui
 ```
 
 This opens a desktop application with tabs for:
-- **Dashboard** — live CO₂, energy, and per-app stats
-- **Applications** — dynamically add/remove apps and browser tab filters
-- **Projects & Files** — create projects, scan directories, select source files
-- **Settings** — hardware config, zone, API key
-- **History & Forecast** — view past sessions and project future carbon costs
+- **Dashboard** - live CO2, energy, and per-app stats
+- **Applications** - dynamically add/remove apps and browser tab filters
+- **Projects & Files** - create projects, scan directories, select source files
+- **Settings** - hardware config, zone, API key
+- **History & Forecast** - view past sessions and project future carbon costs
 
-### Option C — Build from C++ Source
+### Option C - Build from C++ Source
 
 ```bash
 git clone https://github.com/kugi8412/CarbonFootprint.git
@@ -236,7 +238,7 @@ print(f"4h forecast: {projection['projected_carbon_grams']:.2f} g CO2")
 
 ### Non-Electrical Activities (LLM / GPT Integration)
 
-Track carbon emissions from non-computer sources — driving, flights, food, heating, or any custom activity. This API is designed for LLM models (GPT, Claude, etc.) to submit structured carbon data.
+Track carbon emissions from non-computer sources - driving, flights, food, heating, or any custom activity. This API is designed for LLM models (GPT, Claude, etc.) to submit structured carbon data.
 
 ```python
 from carbon_tracker import ActivityTracker, Activity
@@ -293,6 +295,28 @@ project.save("full_day.carbon.json")
 print(project.summary())
 ```
 
+### HPC / Cluster Jobs (Python API)
+
+```python
+from carbon_tracker import detect_hpc_job, build_hpc_report, run_and_measure
+
+# Inside a batch job: read what the scheduler allocated
+job = detect_hpc_job()          # None when not inside SLURM/PBS/LSF/SGE
+
+# Measure a command and build a report
+exit_code, elapsed, energy_kwh, source = run_and_measure(["python", "train.py"])
+report = build_hpc_report(
+    job=job,
+    elapsed_seconds=elapsed,
+    measured_energy_kwh=energy_kwh,
+    measured_source=source,
+    zone="FR",
+)
+print(report.summary())
+print(report.manual_computation_report())
+report.save("job.carbon.json")
+```
+
 ---
 
 ## CLI Reference
@@ -347,6 +371,55 @@ carbon-tracker project add-session my_project.carbon.json \
     --duration 3600 --carbon 12.5 --energy 35.0
 ```
 
+### HPC / Cluster Jobs (SLURM, PBS, LSF, SGE)
+
+On a shared compute cluster a workload is submitted through a batch scheduler
+(`sbatch`, `qsub`, `bsub`). There is usually no battery and no per-app foreground
+window to track, so `carbon-tracker` instead reads the resources the job was
+**allocated** and reports the footprint. When the node exposes no power sensor
+and SLURM energy accounting is unavailable, it falls back to an estimate and
+always prints a transparent **manual-computation worksheet** recording how long
+the job ran and on exactly what hardware, so the cost can be recomputed by hand
+with your site's real numbers.
+
+```bash
+# Show what the scheduler allocated to the current job
+carbon-tracker hpc detect
+
+# Wrap and MEASURE a command inside a batch script (best accuracy).
+# Place the command after `--`. Measures wall time + RAPL/nvidia-smi power.
+carbon-tracker hpc run --output $SLURM_JOB_ID.carbon.json -- python train.py
+
+# Report for the current job (uses SLURM `sacct` ConsumedEnergy when available)
+carbon-tracker hpc report --zone FR
+
+# Report for a finished SLURM job by id (queries sacct)
+carbon-tracker hpc report --job-id 123456 --zone DE
+
+# Estimate without a scheduler: specify resources and wall time by hand
+carbon-tracker hpc report --cpus 64 --gpus 4 --nodes 2 --mem-gb 256 \
+    --elapsed 7200 --zone PL --pue 1.6 --output run.carbon.json
+```
+
+Inside a `sbatch` script:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=train
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=16 --gpus=2 --mem=64G --time=04:00:00
+
+carbon-tracker hpc run --output ${SLURM_JOB_ID}.carbon.json -- \
+    python train.py --epochs 50
+```
+
+Useful flags: `--pue` (datacentre Power Usage Effectiveness, default `1.5`),
+`--cpu-util` / `--gpu-util` (assumed utilisation `0..1`), `--no-sacct` (skip the
+SLURM accounting lookup), `--elapsed` (wall-clock seconds when not measured).
+
+Energy precedence: power sampled while wrapping the command (`hpc run`) →
+SLURM `sacct` `ConsumedEnergy` → resource-based estimate (Green-Algorithms
+model: per-core + per-GPU + per-GB power × PUE).
+
 ---
 
 ## GUI Application
@@ -362,29 +435,29 @@ python -m carbon_tracker.gui
 ### Dashboard Tab
 
 Live-updating display showing:
-- Total CO₂ emissions (grams)
+- Total CO2 emissions (grams)
 - Total energy consumed (Wh)
 - Session duration
 - Current grid carbon intensity
-- Per-application breakdown table (app name, active time, energy, CO₂, CPU%)
+- Per-application breakdown table (app name, active time, energy, CO2, CPU%)
 
 Use the **Start** / **Stop** buttons to control monitoring.
 
 ### Applications Tab
 
-- **Add App** — type an application name (e.g., `Code.exe`) to add it
-- **Pick Running** — opens a dialog listing all running processes; click to select
-- **Remove** — remove selected app from monitoring (data is preserved)
-- **Tab Filters** — add browser + keyword pairs to filter energy to specific tabs
+- **Add App** - type an application name (e.g., `Code.exe`) to add it
+- **Pick Running** - opens a dialog listing all running processes; click to select
+- **Remove** - remove selected app from monitoring (data is preserved)
+- **Tab Filters** - add browser + keyword pairs to filter energy to specific tabs
 
 ### Project & Files Tab
 
-- **New Project** — create a `.carbon.json` project with name and description
-- **Open Project** — load an existing project file
-- **Save Project** — save current state  
-- **Add Files** — pick individual files to associate with the project
-- **Scan Directory** — scan a folder for source files by extension (`.py`, `.js`, `.cpp`, etc.)
-- **File List** — view and manage project files with select/deselect all
+- **New Project** - create a `.carbon.json` project with name and description
+- **Open Project** - load an existing project file
+- **Save Project** - save current state  
+- **Add Files** - pick individual files to associate with the project
+- **Scan Directory** - scan a folder for source files by extension (`.py`, `.js`, `.cpp`, etc.)
+- **File List** - view and manage project files with select/deselect all
 
 ### Settings Tab
 
@@ -395,9 +468,9 @@ Use the **Start** / **Stop** buttons to control monitoring.
 
 ### History & Forecast Tab
 
-- View all recorded sessions with timestamp, duration, CO₂, and energy
-- **Import Session** — add historical data from past work
-- **Forecast** — predict future carbon cost for N hours based on all session data
+- View all recorded sessions with timestamp, duration, CO2, and energy
+- **Import Session** - add historical data from past work
+- **Forecast** - predict future carbon cost for N hours based on all session data
 
 ---
 
@@ -430,7 +503,7 @@ Project files store everything needed to track and forecast carbon costs:
 **Use cases:**
 - Track carbon cost of a specific software project over weeks/months
 - Compare energy profiles of different tools (VS Code vs. JetBrains, Chrome vs. Firefox)
-- Generate forecasts: "If I work 8h/day for 2 weeks, how much CO₂?"
+- Generate forecasts: "If I work 8h/day for 2 weeks, how much CO2?"
 - Import past sessions to build a complete carbon history
 
 ---
@@ -470,8 +543,8 @@ Menu options:
 | `add <app>` | Start tracking a new application |
 | `remove <app>` | Stop tracking (data preserved in report) |
 | `list` | Show active and removed applications |
-| `status` | Current CO₂, energy, and per-app stats |
-| `project <hours>` | Predict future CO₂ for N hours |
+| `status` | Current CO2, energy, and per-app stats |
+| `project <hours>` | Predict future CO2 for N hours |
 | `import` | Import a previous session |
 | `stop` / `quit` | Stop and generate report |
 
@@ -504,7 +577,7 @@ won't report. It picks the best available source in this order:
 3. **TDP estimate (fallback)** - for any component without a sensor, power is
    estimated from its TDP and CPU utilization with a single non-linear curve.
    The app **flags the result as estimated** and tells you how to enable real
-   measurement (see [instruction.md](instruction.md)).
+   measurement (see [instruction.md](https://github.com/kugi8412/CarbonFootprint/blob/main/instruction.md)).
 
 Each app's share is proportional to its CPU usage, with an active-window bonus
 for the foreground app. The reported `power_source` shows exactly what was
@@ -522,8 +595,8 @@ rather than a single average, and reports a 95% confidence interval.
 $$CO_2 = \text{Energy (kWh)} \times \text{Grid Intensity (gCO}_2\text{/kWh)}$$
 
 Grid intensity comes from:
-1. **Live API** — Electricity Maps (requires free API key for best results)
-2. **Fallback Table** — 40+ built-in zones with day/night intensity values
+1. **Live API** - Electricity Maps (requires free API key for best results)
+2. **Fallback Table** - 40+ built-in zones with day/night intensity values
 
 ### Zone Detection
 
@@ -538,12 +611,12 @@ Grid intensity comes from:
 
 The tracker is designed to be **lightweight in both time and memory**:
 
-- **Per-process monitoring only** — CPU and GPU usage is measured only for the processes you explicitly select, not system-wide. This avoids unnecessary overhead from iterating all running processes for full metrics.
-- **Low memory footprint** — per-app data is stored as simple counters (avg CPU, peak CPU, energy sum, carbon sum, hourly buckets). No raw timeseries or sample buffers are kept in memory.
-- **Configurable interval** — the default 2-second monitoring interval keeps CPU overhead under 1%. You can increase it (e.g., 5s or 10s) for even lower overhead.
-- **Proportional energy allocation** — instead of reading hardware power sensors (which requires elevated privileges and polling overhead), the tracker estimates each app's energy share from its CPU percentage relative to total system usage. This uses only `psutil.process_iter()` with minimal fields.
-- **Background API calls** — carbon intensity is fetched from the Electricity Maps API in a separate thread every 15 minutes, so network latency never blocks the monitoring loop.
-- **No disk I/O during monitoring** — data is accumulated in memory and only written to disk when you stop monitoring or save a project.
+- **Per-process monitoring only** - CPU and GPU usage is measured only for the processes you explicitly select, not system-wide. This avoids unnecessary overhead from iterating all running processes for full metrics.
+- **Low memory footprint** - per-app data is stored as simple counters (avg CPU, peak CPU, energy sum, carbon sum, hourly buckets). No raw timeseries or sample buffers are kept in memory.
+- **Configurable interval** - the default 2-second monitoring interval keeps CPU overhead under 1%. You can increase it (e.g., 5s or 10s) for even lower overhead.
+- **Proportional energy allocation** - instead of reading hardware power sensors (which requires elevated privileges and polling overhead), the tracker estimates each app's energy share from its CPU percentage relative to total system usage. This uses only `psutil.process_iter()` with minimal fields.
+- **Background API calls** - carbon intensity is fetched from the Electricity Maps API in a separate thread every 15 minutes, so network latency never blocks the monitoring loop.
+- **No disk I/O during monitoring** - data is accumulated in memory and only written to disk when you stop monitoring or save a project.
 
 ---
 
@@ -594,18 +667,18 @@ carbon-tracker monitor --app Code.exe --api-key YOUR_KEY
 
 | Zone | Region | Typical Intensity |
 |------|--------|-------------------|
-| `PL` | Poland | 700 gCO₂/kWh |
-| `DE` | Germany | 400 gCO₂/kWh |
-| `FR` | France | 70 gCO₂/kWh |
-| `SE` | Sweden | 30 gCO₂/kWh |
-| `GB` | United Kingdom | 250 gCO₂/kWh |
-| `US-CAL-CISO` | California | 230 gCO₂/kWh |
-| `US-MIDA-PJM` | Mid-Atlantic US | 400 gCO₂/kWh |
-| `US-TEX-ERCO` | Texas | 450 gCO₂/kWh |
-| `JP` | Japan | 500 gCO₂/kWh |
-| `AU` | Australia | 600 gCO₂/kWh |
-| `IN` | India | 700 gCO₂/kWh |
-| `BR` | Brazil | 80 gCO₂/kWh |
+| `PL` | Poland | 700 gCO2/kWh |
+| `DE` | Germany | 400 gCO2/kWh |
+| `FR` | France | 70 gCO2/kWh |
+| `SE` | Sweden | 30 gCO2/kWh |
+| `GB` | United Kingdom | 250 gCO2/kWh |
+| `US-CAL-CISO` | California | 230 gCO2/kWh |
+| `US-MIDA-PJM` | Mid-Atlantic US | 400 gCO2/kWh |
+| `US-TEX-ERCO` | Texas | 450 gCO2/kWh |
+| `JP` | Japan | 500 gCO2/kWh |
+| `AU` | Australia | 600 gCO2/kWh |
+| `IN` | India | 700 gCO2/kWh |
+| `BR` | Brazil | 80 gCO2/kWh |
 
 Full list: 40+ zones in `carbon_tracker/carbon_api.py`.
 
@@ -712,14 +785,14 @@ project = CarbonProject(name="My App", description="...", zone="DE")
 | `scan_directory(path, extensions)` → `list` | Find source files |
 | `add_files(paths)` | Associate files with project |
 | `remove_files(paths)` | Remove file associations |
-| `total_carbon_grams()` → `float` | Sum CO₂ across sessions + activities |
+| `total_carbon_grams()` → `float` | Sum CO2 across sessions + activities |
 | `total_energy_kwh()` → `float` | Sum energy across all sessions |
 | `total_duration_hours()` → `float` | Sum time across all sessions |
 | `per_app_totals()` → `dict` | Per-app aggregate stats |
 | `project_future(hours)` → `dict` | Forecast from history |
 | `add_activity(activity)` | Add a non-electrical Activity |
 | `remove_activity(index)` | Remove activity by index |
-| `activities_co2_grams()` → `float` | CO₂ from activities only |
+| `activities_co2_grams()` → `float` | CO2 from activities only |
 | `summary()` → `str` | Formatted text report |
 
 ### `ActivityTracker`
@@ -743,9 +816,9 @@ tracker.add(Activity.custom("My activity", co2_grams=100))
 | `add_food(food_type, kg, desc)` | Shortcut for food |
 | `add_heating(kwh, fuel, desc)` | Shortcut for heating |
 | `add_custom(name, co2_grams, desc)` | Shortcut for custom |
-| `total_co2_grams()` → `float` | Total CO₂ (grams) |
-| `total_co2_kg()` → `float` | Total CO₂ (kg) |
-| `by_category()` → `dict` | CO₂ grouped by category |
+| `total_co2_grams()` → `float` | Total CO2 (grams) |
+| `total_co2_kg()` → `float` | Total CO2 (kg) |
+| `by_category()` → `dict` | CO2 grouped by category |
 | `equivalences()` → `dict` | Real-world equivalences |
 | `report()` → `str` | Full text report |
 | `save(path)` | Save to JSON |
@@ -832,7 +905,7 @@ A: A plugged-in battery reports no discharge, so whole-system wattage can't be
 read from it. The tracker then measures each component it can (GPU via
 `nvidia-smi`, CPU via RAPL/LibreHardwareMonitor) and estimates the rest. To get
 real CPU power on Windows, run **LibreHardwareMonitor**; on Linux RAPL works out
-of the box. See [instruction.md](instruction.md#5-get-real-measured-power-optional).
+of the box. See [instruction.md](https://github.com/kugi8412/CarbonFootprint/blob/main/instruction.md).
 
 **Q: Can I track GPU-heavy workloads?**  
 A: The tracker includes GPU TDP in calculations. For NVIDIA GPUs, the C++ version can use NVML for real power readings.
@@ -850,4 +923,4 @@ A: Yes. Use the CLI: `carbon-tracker monitor --app python --project ci.carbon.js
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](https://github.com/kugi8412/CarbonFootprint/blob/main/LICENSE) for details.
