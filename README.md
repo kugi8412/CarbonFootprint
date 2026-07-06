@@ -1,6 +1,6 @@
 # Carbon Footprint Tracker
 
-[![Version](https://img.shields.io/badge/version-1.1.4-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/version-1.1.5-brightgreen.svg)]()
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -107,9 +107,13 @@ chmod +x build.sh && ./build.sh
 
 | OS | Requirements | Install |
 |----|-------------|---------|
-| **Windows** | Visual Studio 2017+ (C++ workload), CMake | [visualstudio.microsoft.com](https://visualstudio.microsoft.com/), [cmake.org](https://cmake.org/download/) |
+| **Windows** | Visual Studio 2017+ (C++ workload) **or** MinGW-w64, CMake | [visualstudio.microsoft.com](https://visualstudio.microsoft.com/), [cmake.org](https://cmake.org/download/) |
 | **Linux** | GCC 7+, CMake, X11 headers | `sudo apt install cmake build-essential libx11-dev` |
 | **macOS** | Xcode CLI tools, CMake | `xcode-select --install && brew install cmake` |
+
+> On Windows `build.bat` auto-detects an installed Visual Studio (via `vswhere`)
+> or MinGW-w64 compiler, so it works from a normal PowerShell/cmd prompt - you no
+> longer need the "Developer PowerShell for VS".
 
 ---
 
@@ -913,11 +917,6 @@ A: The tracker includes GPU TDP in calculations. For NVIDIA GPUs, the C++ versio
 **Q: What's the difference between the Python and C++ versions?**  
 A: The Python version is easier to install (`pip install`) and has the GUI. The C++ version has lower overhead and direct hardware access (RAPL, NVML).
 
-**Q: How do I track carbon cost of a project over time?**  
-A: Use project files (`.carbon.json`). Each monitoring session is saved automatically. Open the same project file each time to build a history.
-
-**Q: Can I use this in CI/CD?**  
-A: Yes. Use the CLI: `carbon-tracker monitor --app python --project ci.carbon.json`. Stop with Ctrl+C or a timeout.
 
 ---
 

@@ -7,6 +7,7 @@ Carbon intensity API: auto-detect zone + fetch real-time grid data.
 
 import requests
 import time
+import locale
 
 from typing import Tuple
 
@@ -20,10 +21,37 @@ def get_fallback_intensity(zone: str) -> float:
     return day_val if 6 <= hour < 18 else night_val
 
 
+def _local_zone_guess() -> Tuple[str, str]:
+    """Best-effort zone guess from the system locale when there is no network.
+
+    Returns (zone_code, description) or ("", "") when nothing can be inferred.
+    This lets the tracker work fully offline (no internet, no git) instead of
+    returning an empty zone.
+    """
+    try:
+        code = locale.getdefaultlocale()[0] or ""
+    except Exception:
+        code = ""
+
+    # Locale looks like "pl_PL", "en_GB", "en_US"; the part after "_" is the
+    # ISO country code we map to an Electricity Maps zone.
+    country = ""
+    if "_" in code:
+        country = code.split("_", 1)[1].upper()[:2]
+
+    if country and country in _COUNTRY_TO_ZONE:
+        zone = _COUNTRY_TO_ZONE[country]
+        return zone, f"{country} (offline/locale)"
+    return "", ""
+
+
 def auto_detect_zone() -> Tuple[str, str]:
     """
     Auto-detect electricity zone from IP geolocation.
-    Returns (zone_code, description) or ("", "") on failure.
+
+    Falls back to the system locale when the network is unavailable so the
+    tracker still works offline. Returns (zone_code, description); the zone is
+    "" only when neither the network nor the locale can be resolved.
     """
     for url in [
         "https://ipapi.co/json/",
@@ -40,14 +68,22 @@ def auto_detect_zone() -> Tuple[str, str]:
                 return zone, f"{city} ({country})"
         except Exception:
             continue
-    return "", ""
+
+    # Offline / blocked network: fall back to the locale-based guess.
+    return _local_zone_guess()
 
 
 def fetch_carbon_intensity(zone: str, api_key: str = "") -> Tuple[float, bool]:
     """
     Fetch live carbon intensity from Electricity Maps API.
     Returns (intensity_gCO2_per_kWh, is_real_data).
+
+    When ``zone`` is empty (detection failed) a neutral global-average
+    estimate is used instead of crashing.
     """
+    if not zone:
+        return get_fallback_intensity(""), False
+
     try:
         url = f"https://api.electricitymap.org/v3/carbon-intensity/latest?zone={zone}"
         headers = {}

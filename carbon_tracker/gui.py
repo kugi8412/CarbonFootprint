@@ -798,7 +798,10 @@ class CarbonTrackerGUI(QMainWindow):
 
     def _open_project(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Project", "", "Carbon Project (*.carbon.json);;All files (*.*)"
+            self,
+            "Open Project",
+            "",
+            "JSON Files (*.json *.carbon.json);;All files (*.*)",
         )
         if not path:
             return
@@ -1108,7 +1111,7 @@ class CarbonTrackerGUI(QMainWindow):
             self,
             "Import Session",
             "",
-            "Carbon Project (*.carbon.json);;JSON (*.json);;All (*.*)",
+            "JSON Files (*.json *.carbon.json);;All files (*.*)",
         )
         if not path:
             return
@@ -1158,7 +1161,38 @@ class CarbonTrackerGUI(QMainWindow):
         event.accept()
 
 
+def _ensure_qt_plugin_path():
+    """Make PyQt5's platform plugins discoverable.
+
+    In fresh virtual environments (especially on Windows) the Qt plugin path
+    is sometimes not set, producing:
+
+        qt.qpa.plugin: Could not find the Qt platform plugin "windows" in ""
+
+    We locate the plugins that ship inside the PyQt5 package and point Qt at
+    them before the QApplication is created.
+    """
+    try:
+        import PyQt5
+
+        pkg_dir = os.path.dirname(os.path.abspath(PyQt5.__file__))
+        for base in (
+            os.path.join(pkg_dir, "Qt5", "plugins"),
+            os.path.join(pkg_dir, "Qt", "plugins"),
+        ):
+            platforms_dir = os.path.join(base, "platforms")
+            if os.path.isdir(platforms_dir):
+                os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", platforms_dir)
+                os.environ.setdefault("QT_PLUGIN_PATH", base)
+                QApplication.addLibraryPath(base)
+                break
+    except Exception:
+        # Best effort only - if this fails Qt may still find its plugins.
+        pass
+
+
 def main():
+    _ensure_qt_plugin_path()
     app = QApplication(sys.argv)
     app.setStyleSheet(_DARK_STYLE)
     window = CarbonTrackerGUI()

@@ -15,7 +15,7 @@
 static CarbonEngine* g_engine = nullptr;
 
 #ifndef CARBON_VERSION
-#define CARBON_VERSION "1.1.4"
+#define CARBON_VERSION "1.1.5"
 #endif
 
 static void PrintBanner() {
@@ -752,7 +752,7 @@ int main(int argc, char* argv[]) {
             } else if (arg == "--start") {
                 // handled below
             } else if (arg == "--help" || arg == "-h") {
-                std::cout << "Carbon Footprint Tracker v1.0\n\n";
+                std::cout << "Carbon Footprint Tracker v" << CARBON_VERSION << "\n\n";
                 std::cout << "Usage: carbon_tracker [options]\n\n";
                 std::cout << "Options:\n";
                 std::cout << "  --start         Start monitoring immediately\n";

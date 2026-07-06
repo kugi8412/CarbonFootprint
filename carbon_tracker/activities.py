@@ -56,7 +56,6 @@ def get_energy_types() -> List[str]:
 # Activity data model
 # ============================================================
 
-
 @dataclass
 class Activity:
     """

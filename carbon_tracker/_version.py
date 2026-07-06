@@ -9,4 +9,4 @@ the build backend (pyproject.toml -> tool.setuptools.dynamic) and by the
 C++ build, keeping every component in sync automatically.
 """
 
-__version__ = "1.1.4"
+__version__ = "1.1.5"

@@ -147,10 +147,16 @@ void CarbonEngine::MonitorLoop() {
         // Print live status every 10 ticks
         tickCount++;
         if (tickCount % 10 == 0) {
+            std::string powerTag;
+            if (power.systemMeasured) {
+                powerTag = " (sys:battery)";
+            } else {
+                powerTag = " (cpu:" + power.cpuSource + ",gpu:" + power.gpuSource + ")";
+            }
             std::cout << "\r[" << TimeUtil::Now() << "] "
                       << "Active: " << activeApp
                       << " | CPU: " << std::fixed << std::setprecision(1) << systemCpuUsage << "%"
-                      << " | Power: " << std::setprecision(1) << power.totalWatts << "W"
+                      << " | Power: " << std::setprecision(1) << power.totalWatts << "W" << powerTag
                       << " | CO2: " << std::setprecision(2) << totalSessionCarbonGrams_ << "g"
                       << " | Intensity: " << std::setprecision(0) << intensity.intensity << "g/kWh"
                       << "     " << std::flush;
