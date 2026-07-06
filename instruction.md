@@ -175,3 +175,7 @@ the same way (RAPL on Linux, `nvidia-smi`/`rocm-smi` for GPUs).
 | CPU power is `None` on Windows | LibreHardwareMonitor not running / not elevated |
 | GPU power is `None` | non-NVIDIA GPU without nvidia-smi — use LibreHardwareMonitor |
 | GUI won't start | install the GUI extra: `pip install "carbon-footprint-tracker[gui]"` |
+| `Could not find the Qt platform plugin "windows"` | fixed automatically since 1.1.5 — reinstall/upgrade: `pip install -U "carbon-footprint-tracker[gui]"` |
+| `pip` can't find `psutil>=5.9.0` | upgrade the tracker to **1.1.5+** (needs only `psutil>=5.8.0`) |
+| `build.bat` fails: `CMAKE_CXX_COMPILER not set` / `nmake ... no such file` | install Visual Studio (Desktop C++) or MinGW-w64; `build.bat` (1.1.5+) auto-detects them from a normal prompt |
+| Forecast/import ignores my `.json` files | fixed in 1.1.5 — the file dialog now lists all `*.json` files, not only `*.carbon.json` |
