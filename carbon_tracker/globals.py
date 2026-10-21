@@ -5,43 +5,24 @@
 # HARDWARE TDP
 # ============================================================
 _CPU_TDP_TABLE = [
-    # Intel Mobile (P - Performance 28W, U - Ultra-low power 15W)
-    ("i7-14.*P", 28),
-    ("i7-13.*P", 28),
-    ("i7-12.*P", 28),
-    ("i5-14.*P", 28),
-    ("i5-13.*P", 28),
-    ("i5-12.*P", 28),
-    ("i7-14.*U", 15),
-    ("i7-13.*U", 15),
-    ("i7-12.*U", 15),
-    ("i5-14.*U", 15),
-    ("i5-13.*U", 15),
-    ("i5-12.*U", 15),
-    ("i7-14.*H", 45),
-    ("i7-13.*H", 45),
-    ("i5-14.*H", 45),
-    ("i5-13.*H", 45),
-    ("i9-14900H", 45),
-    ("i9-13900H", 45),
-    # Intel 11th / 10th gen mobile (H = 45W, U = 15W)
-    ("i9-11.*H", 45),
-    ("i7-11.*H", 45),
-    ("i5-11.*H", 45),
-    ("i9-10.*H", 45),
-    ("i7-10.*H", 45),
-    ("i5-10.*H", 45),
-    ("i7-11.*U", 15),
-    ("i5-11.*U", 15),
-    ("i7-10.*U", 15),
-    ("i5-10.*U", 15),
-    # Intel Desktop & Core Ultra
-    ("Core Ultra 9.*K", 125),
-    ("Core Ultra 7.*K", 125),
-    ("Core Ultra 5.*K", 125),
-    ("Core Ultra 9", 45),
-    ("Core Ultra 7", 28),
-    ("Core Ultra 5", 28),
+    # Intel Mobile 10th-14th gen (HX 55W, H 45W, P 28W, U 15W, G-series 28W)
+    (r"i[3579]-1[0-4]\d+HX", 55),
+    (r"i[57]-113\d\dH", 35),  # 11th gen H35 (i7-11370H, i5-11320H)
+    (r"i[3579]-1[0-4]\d+H", 45),
+    (r"i[3579]-1[0-4]\d+P", 28),
+    (r"i[3579]-1[0-4]\d+U", 15),
+    (r"i[3579]-1[0-4]\d+G\d", 28),
+    # Intel Core Ultra (reported as "Core(TM) Ultra 7 155H")
+    (r"Ultra [579] \d+K", 125),
+    (r"Ultra [579] \d+HX", 55),
+    (r"Ultra 9 \d+H", 45),
+    (r"Ultra [57] \d+H", 28),
+    (r"Ultra [579] \d+U", 15),
+    (r"Ultra [579] \d+V", 17),
+    ("Ultra 9", 45),
+    ("Ultra 7", 28),
+    ("Ultra 5", 28),
+    # Intel Desktop
     ("i9-14900K", 125),
     ("i9-13900K", 125),
     ("i9-12900K", 125),
@@ -84,9 +65,10 @@ _CPU_TDP_TABLE = [
     ("7640U", 28),
     ("7530U", 15),
     ("6800U", 28),
-    ("Ryzen 9.*HX", 55),
-    ("Ryzen 7.*H", 45),
-    ("Ryzen 5.*H", 45),
+    (r"Ryzen [3579] \d+HX", 55),
+    (r"Ryzen [3579] \d+H", 45),
+    (r"Ryzen [3579] \d+U", 28),
+    ("Ryzen AI", 28),
     # AMD Ryzen Desktop
     ("Ryzen 9.*X3D", 120),
     ("Ryzen 7.*X3D", 120),
@@ -133,6 +115,11 @@ _CPU_TDP_TABLE = [
 _GPU_TDP_TABLE = [
     # NVIDIA laptop GPUs - MUST precede desktop entries because a name like
     # "RTX 4070 Laptop GPU" also substring-matches the desktop "RTX 4070".
+    ("RTX 5090 Laptop", 175),
+    ("RTX 5080 Laptop", 175),
+    ("RTX 5070 Ti Laptop", 140),
+    ("RTX 5070 Laptop", 115),
+    ("RTX 5060 Laptop", 115),
     ("RTX 4090 Laptop", 150),
     ("RTX 4080 Laptop", 150),
     ("RTX 4070 Laptop", 115),
@@ -209,6 +196,8 @@ _GPU_TDP_TABLE = [
     ("Radeon 890M", 15),
     ("Radeon 780M", 15),
     ("Radeon 680M", 15),
+    (r"Radeon\(TM\) Graphics", 15),
+    ("Radeon Graphics", 15),
     ("Radeon", 150),
     # Intel Arc & Integrated
     ("Arc A770", 225),
@@ -219,6 +208,34 @@ _GPU_TDP_TABLE = [
     ("Intel UHD", 15),
     ("Intel HD", 10),
     ("Iris", 15),
+]
+
+# ============================================================
+# DATA-CENTER / HPC CPU: (pattern, package TDP W, physical cores per socket)
+# ============================================================
+_HPC_CPU_TDP_TABLE = [
+    ("E5-2697 v3", 145, 14),
+    ("E5-2697 v4", 145, 18),
+    ("E5-2698 v3", 135, 16),
+    ("E5-2690 v3", 135, 12),
+    ("E5-2690 v4", 135, 14),
+    ("E5-2680 v3", 120, 12),
+    ("E5-2680 v4", 120, 14),
+    ("E5-2670 v3", 120, 12),
+    ("E5-2650 v4", 105, 12),
+    ("E5-2630 v4", 85, 10),
+    ("Gold 6148", 150, 20),
+    ("Gold 6248", 150, 20),
+    ("Gold 6130", 125, 16),
+    ("Gold 6230", 125, 20),
+    ("Platinum 8280", 205, 28),
+    ("Platinum 8380", 270, 40),
+    ("Platinum 8480", 350, 56),
+    ("EPYC 7742", 225, 64),
+    ("EPYC 7763", 280, 64),
+    ("EPYC 7543", 225, 32),
+    ("EPYC 9254", 200, 24),
+    ("EPYC 9654", 360, 96),
 ]
 
 # ============================================================
@@ -340,33 +357,76 @@ _MISC_FACTORS = {
 # FALLBACK INTENSITY VALUES (gCO2eq/kWh)
 # ============================================================
 
-# Fallback intensity values (gCO2eq/kWh) by zone: (day, night)
+# Fallback intensity values (gCO2eq/kWh) by country: lifecycle annual averages
+# from Ember, Yearly Electricity Data (via Our World in Data), 2025 or the
+# latest year available. Sub-national zones (US-CAL-CISO, CA-ON) use their
+# country's value.
 _FALLBACK_INTENSITY = {
-    "PL": (650, 750),
-    "DE": (350, 450),
-    "FR": (60, 80),
-    "SE": (25, 40),
-    "NO": (20, 30),
-    "GB": (200, 280),
-    "ES": (180, 250),
-    "IT": (300, 380),
-    "DK": (150, 250),
-    "NL": (350, 430),
-    "CH": (30, 50),
-    "AT": (100, 160),
-    "CZ": (450, 550),
-    "FI": (80, 120),
-    "US-CAL": (200, 300),
-    "US-NY": (250, 320),
-    "US-TEX": (380, 450),
-    "US-MIDA": (400, 480),
-    "CA-ON": (30, 50),
-    "CA-QC": (10, 15),
-    "JP": (450, 530),
-    "CN": (550, 650),
-    "IN": (650, 720),
-    "AU": (550, 650),
-    "BR": (80, 120),
+    "AE": 468,
+    "AR": 346,
+    "AT": 117,
+    "AU": 525,
+    "BE": 150,
+    "BG": 276,
+    "BR": 110,
+    "CA": 191,
+    "CH": 39,
+    "CL": 289,
+    "CN": 525,
+    "CZ": 401,
+    "DE": 330,
+    "DK": 114,
+    "EE": 319,
+    "EG": 563,
+    "ES": 154,
+    "FI": 57,
+    "FR": 41,
+    "GB": 217,
+    "GR": 315,
+    "HR": 158,
+    "HU": 163,
+    "ID": 680,
+    "IE": 257,
+    "IL": 493,
+    "IN": 670,
+    "IT": 285,
+    "JP": 477,
+    "KR": 417,
+    "LT": 138,
+    "LV": 139,
+    "MX": 474,
+    "MY": 602,
+    "NL": 254,
+    "NO": 28,
+    "NZ": 93,
+    "PH": 588,
+    "PL": 589,
+    "PT": 128,
+    "RO": 251,
+    "SA": 692,
+    "SE": 35,
+    "SG": 497,
+    "SI": 183,
+    "SK": 95,
+    "TH": 546,
+    "TR": 475,
+    "TW": 633,
+    "UA": 250,
+    "US": 384,
+    "VN": 461,
+    "ZA": 699,
+}
+
+# Zones not in the table: world average (same source, 2025)
+FALLBACK_GLOBAL_INTENSITY = 458.0
+
+# Old zone codes that Electricity Maps does not accept
+_ZONE_ALIASES = {
+    "US-MIDA": "US-MIDA-PJM",
+    "US-CAL": "US-CAL-CISO",
+    "US-NY": "US-NY-NYIS",
+    "US-TEX": "US-TEX-ERCO",
+    "CL": "CL-SEN",
 }
 
 # Country code -> Electricity Maps zone
@@ -400,8 +460,16 @@ _COUNTRY_TO_ZONE = {
     "AU": "AU",
     "BR": "BR",
     "KR": "KR",
-    "CA": "CA-ON",
-    "US": "US-MIDA",
+    "CA": "CA",
+    "US": "US",
+    "LT": "LT",
+    "LV": "LV",
+    "EE": "EE",
+    "SI": "SI",
+    "CL": "CL-SEN",
+    "PH": "PH",
+    "VN": "VN",
+    "EG": "EG",
     "UA": "UA",
     "TR": "TR",
     "IL": "IL",
@@ -416,6 +484,69 @@ _COUNTRY_TO_ZONE = {
     "TH": "TH",
     "MY": "MY",
     "ID": "ID",
+}
+
+# IANA time zone -> country, used to guess the zone without network access
+_TIMEZONE_TO_COUNTRY = {
+    "Europe/Warsaw": "PL",
+    "Europe/Berlin": "DE",
+    "Europe/Paris": "FR",
+    "Europe/London": "GB",
+    "Europe/Stockholm": "SE",
+    "Europe/Oslo": "NO",
+    "Europe/Madrid": "ES",
+    "Europe/Rome": "IT",
+    "Europe/Copenhagen": "DK",
+    "Europe/Amsterdam": "NL",
+    "Europe/Zurich": "CH",
+    "Europe/Vienna": "AT",
+    "Europe/Prague": "CZ",
+    "Europe/Helsinki": "FI",
+    "Europe/Lisbon": "PT",
+    "Europe/Brussels": "BE",
+    "Europe/Dublin": "IE",
+    "Europe/Bucharest": "RO",
+    "Europe/Budapest": "HU",
+    "Europe/Bratislava": "SK",
+    "Europe/Zagreb": "HR",
+    "Europe/Sofia": "BG",
+    "Europe/Athens": "GR",
+    "Europe/Kiev": "UA",
+    "Europe/Kyiv": "UA",
+    "Europe/Istanbul": "TR",
+    "Europe/Vilnius": "LT",
+    "Europe/Riga": "LV",
+    "Europe/Tallinn": "EE",
+    "Europe/Ljubljana": "SI",
+    "Asia/Tokyo": "JP",
+    "Asia/Shanghai": "CN",
+    "Asia/Kolkata": "IN",
+    "Asia/Seoul": "KR",
+    "Asia/Taipei": "TW",
+    "Asia/Singapore": "SG",
+    "Asia/Bangkok": "TH",
+    "Asia/Kuala_Lumpur": "MY",
+    "Asia/Jakarta": "ID",
+    "Asia/Manila": "PH",
+    "Asia/Ho_Chi_Minh": "VN",
+    "Asia/Dubai": "AE",
+    "Asia/Riyadh": "SA",
+    "Asia/Jerusalem": "IL",
+    "Africa/Cairo": "EG",
+    "Africa/Johannesburg": "ZA",
+    "Pacific/Auckland": "NZ",
+    "Australia/Melbourne": "AU",
+    "Australia/Sydney": "AU",
+    "America/Sao_Paulo": "BR",
+    "America/Mexico_City": "MX",
+    "America/Argentina/Buenos_Aires": "AR",
+    "America/Santiago": "CL",
+    "America/Toronto": "CA",
+    "America/Vancouver": "CA",
+    "America/New_York": "US",
+    "America/Chicago": "US",
+    "America/Denver": "US",
+    "America/Los_Angeles": "US",
 }
 
 # ============================================================
@@ -591,6 +722,20 @@ PROJECTION_CPU_LOAD_ESTIMATE = 0.30
 MIN_SYSTEM_CPU_NOISE = 0.1
 ACTIVE_APP_ENERGY_TAX = 0.10
 BACKGROUND_APP_ENERGY_TAX = 0.02
+
+# Energy not attributed to a tracked app (OS, display, other processes)
+OTHER_APP_NAME = "(other: system + untracked)"
+
+# A longer gap between ticks (sleep, hibernate) counts as one interval
+MAX_TICK_GAP_SEC = 60.0
+
+# Upper bounds for TDPs reported by drivers; larger values are placeholders
+CPU_TDP_MAX_WATTS = 500.0
+GPU_TDP_MAX_WATTS_LAPTOP = 250.0
+GPU_TDP_MAX_WATTS = 1500.0
+
+# Shortest hourly bucket used as a forecast sample
+MIN_FORECAST_BUCKET_SEC = 300.0
 
 # How often to sample the battery for real power draw (seconds). Battery reads
 # can involve a subprocess (Windows/WSL/macOS), so they are throttled and cached.

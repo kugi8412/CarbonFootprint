@@ -1,7 +1,7 @@
 # Carbon Footprint Tracker
 
-[![Version](https://img.shields.io/badge/version-1.1.5-brightgreen.svg)]()
-[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![Version](https://img.shields.io/badge/version-1.6.0-brightgreen.svg)]()
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 
@@ -38,7 +38,7 @@ A cross-platform carbon footprint tracker that monitors your computer usage and 
 - **Gaussian-Mixture Forecasting** - projects future carbon both for the whole system and **per application** using a dependency-free 1-D Gaussian Mixture model, capturing distinct usage modes with a 95% confidence range
 - **Browser Tab Filtering** - filter energy tracking to specific browser tabs by keyword (e.g., only count YouTube in Firefox)
 - **HPC / Cluster Jobs** - measure or estimate the footprint of batch jobs on **SLURM, PBS/Torque, LSF and SGE**. Reads the resources a job was allocated (nodes, cores, GPUs, memory), uses SLURM `sacct` energy accounting or RAPL/`nvidia-smi` when available, and otherwise emits a transparent **manual-computation worksheet** (time + hardware + formula) so the cost can be recomputed by hand.
-- **Real-Time Carbon Intensity** - fetches live grid carbon intensity from the [Electricity Maps API](https://www.electricitymaps.com/) with 40+ zone fallbacks
+- **Real-Time Carbon Intensity** - fetches live grid carbon intensity from the [Electricity Maps API](https://www.electricitymaps.com/) with built-in values for 50+ countries when offline
 - **Auto Country Detection** - detects your location via IP geolocation and maps it to the correct electricity zone
 - **Auto Report on Stop** - when you stop monitoring (GUI or API), a JSON report is automatically saved with full session data
 - **Project File Management** - save/load `.carbon.json` project files with full session history, app data, and file tracking
@@ -77,7 +77,7 @@ print(session.summary())
 ### Option B - GUI Application
 
 ```bash
-pip install carbon-footprint-tracker[gui]
+pip install "carbon-footprint-tracker[gui]"
 carbon-tracker-gui
 ```
 
@@ -147,16 +147,13 @@ print(session.summary())
 
 ```python
 from carbon_tracker import CarbonTracker
-from carbon_tracker.models import BrowserTabFilter
 
 tracker = CarbonTracker()
 tracker.add_app("firefox.exe")
 
-# Only count energy when Firefox title contains "YouTube" or "Spotify"
-tracker.add_tab_filter(BrowserTabFilter(
-    browser="firefox.exe",
-    keywords=["YouTube", "Spotify"]
-))
+# Only count energy when the Firefox title contains "YouTube" or "Spotify"
+tracker.add_tab_filter("firefox.exe", "YouTube")
+tracker.add_tab_filter("firefox.exe", "Spotify")
 
 tracker.start()
 ```
@@ -178,11 +175,11 @@ print(f"Cores: {hw.cpu_cores}")
 ```python
 from carbon_tracker.carbon_api import auto_detect_zone, fetch_carbon_intensity
 
-zone = auto_detect_zone()
-print(f"Detected zone: {zone}")  # e.g., "PL"
+zone, where = auto_detect_zone()
+print(f"Detected zone: {zone} ({where})")  # e.g., "PL (Warsaw (PL))"
 
-intensity = fetch_carbon_intensity(zone)
-print(f"Grid intensity: {intensity} gCO2/kWh")
+intensity, is_live = fetch_carbon_intensity(zone)
+print(f"Grid intensity: {intensity} gCO2/kWh ({'live' if is_live else 'table'})")
 ```
 
 ### Project Management
@@ -220,14 +217,16 @@ print(f"Projected 8h CO2: {projection['projected_carbon_grams']:.2f} g")
 ### Import Historical Sessions
 
 ```python
+from datetime import datetime
 from carbon_tracker import CarbonProject
 from carbon_tracker.models import SessionData
 
 project = CarbonProject.load("my_project.carbon.json")
 
-# Import a past session manually
+# Import a past session manually (times are Unix timestamps)
 past = SessionData(
-    start_time="2025-01-15T09:00:00",
+    session_id="manual_2025_01_15",
+    start_time=datetime(2025, 1, 15, 9, 0).timestamp(),
     duration_seconds=14400,  # 4 hours
     total_carbon_grams=45.0,
     total_energy_kwh=0.120,  # 120 Wh = 0.120 kWh
@@ -342,7 +341,7 @@ Output:
 
 === Location Detection ===
   Detected Zone: PL
-  Carbon Intensity: 680 gCO2/kWh (fallback)
+  Carbon Intensity: 589 gCO2/kWh (fallback)
 ```
 
 ### Start Monitoring
@@ -555,8 +554,7 @@ Menu options:
 ### Build Flags
 
 ```bash
-cmake .. -DUSE_NVML=ON    # NVIDIA GPU monitoring (requires NVML)
-cmake .. -DUSE_CURL=ON    # libcurl for HTTP (alternative to WinHTTP)
+cmake .. -DUSE_NVML=ON    # NVIDIA GPU power via NVML (CUDA toolkit / driver headers)
 ```
 
 ---
@@ -584,8 +582,11 @@ won't report. It picks the best available source in this order:
    measurement (see [instruction.md](https://github.com/kugi8412/CarbonFootprint/blob/main/instruction.md)).
 
 Each app's share is proportional to its CPU usage, with an active-window bonus
-for the foreground app. The reported `power_source` shows exactly what was
-measured, e.g. `battery`, `components(cpu:meas,gpu:meas)`, or `estimate`.
+for the foreground app. Whatever no tracked app accounts for (OS, display,
+untracked processes) is reported as `(other: system + untracked)`, so the
+per-app rows always add up to the session total. The reported `power_source`
+shows exactly what was measured, e.g. `battery`,
+`components(cpu:meas,gpu:meas)`, or `estimate`.
 
 ### Forecasting (Gaussian Mixture)
 
@@ -600,14 +601,21 @@ $$CO_2 = \text{Energy (kWh)} \times \text{Grid Intensity (gCO}_2\text{/kWh)}$$
 
 Grid intensity comes from:
 1. **Live API** - Electricity Maps (requires free API key for best results)
-2. **Fallback Table** - 40+ built-in zones with day/night intensity values
+2. **Fallback Table** - annual averages for 50+ countries (Ember, 2025), used
+   without an API key or offline
 
 ### Zone Detection
 
 1. Query `ipapi.co` → get country code
-2. Fallback to `ip-api.com` if first fails
-3. Map country code to electricity zone (e.g., `US` → `US-MIDA-PJM`)
-4. Fetch carbon intensity for that zone
+2. Fallback to `ipinfo.io`, then `ipwho.is` (all HTTPS)
+3. Offline: guess from the Windows region setting, then the time zone, then
+   the language locale
+4. Map country code to an Electricity Maps zone ID (e.g., `PL` → `PL`;
+   the old `US-MIDA` → `US-MIDA-PJM`)
+5. Fetch carbon intensity for that zone
+
+A project stores its zone; every session of the project uses it, so sessions
+of one project are never computed with different grids.
 
 ---
 
@@ -628,13 +636,14 @@ The tracker is designed to be **lightweight in both time and memory**:
 
 ### GPU Auto-Detection
 
-GPU auto-detection may fail or return the integrated GPU (e.g., Intel UHD) instead of the discrete GPU (e.g., NVIDIA RTX) on some systems. This happens because:
+The GPU is detected automatically: `nvidia-smi` is asked first
+(it names the discrete GPU even when Optimus has powered it down), then every
+display adapter is ranked discrete > integrated > virtual. Driver-reported TDPs
+that are not plausible (e.g. 5001 W) are replaced by the lookup table.
 
-- On Windows, the registry enumeration in `detect_gpu_name()` iterates display adapter subkeys sequentially. The integrated GPU often appears first (subkey `0000`), and the discrete GPU appears later.
-- The current logic skips entries containing "Intel" or "UHD" and picks the first non-Intel GPU, but on some systems with driver configurations the discrete GPU subkey may not have `DriverDesc` populated.
-- On laptops with NVIDIA Optimus or AMD Switchable Graphics, the discrete GPU may not be visible in the registry when it is powered down.
-
-**Workaround:** Manually set the GPU name and TDP in the Settings tab of the GUI, or pass a `HardwareInfo` object with the correct values when using the Python API:
+A machine with only a non-NVIDIA discrete GPU whose name is missing from the
+table still gets a generic TDP. To override it, set the GPU name and TDP in the
+Settings tab of the GUI, or pass a `HardwareInfo` object when using the Python API:
 
 ```python
 from carbon_tracker import CarbonTracker
@@ -669,22 +678,26 @@ carbon-tracker monitor --app Code.exe --api-key YOUR_KEY
 
 ### Supported Zones
 
-| Zone | Region | Typical Intensity |
-|------|--------|-------------------|
-| `PL` | Poland | 700 gCO2/kWh |
-| `DE` | Germany | 400 gCO2/kWh |
-| `FR` | France | 70 gCO2/kWh |
-| `SE` | Sweden | 30 gCO2/kWh |
-| `GB` | United Kingdom | 250 gCO2/kWh |
-| `US-CAL-CISO` | California | 230 gCO2/kWh |
-| `US-MIDA-PJM` | Mid-Atlantic US | 400 gCO2/kWh |
-| `US-TEX-ERCO` | Texas | 450 gCO2/kWh |
-| `JP` | Japan | 500 gCO2/kWh |
-| `AU` | Australia | 600 gCO2/kWh |
-| `IN` | India | 700 gCO2/kWh |
-| `BR` | Brazil | 80 gCO2/kWh |
+Any [Electricity Maps zone](https://app.electricitymaps.com/map) works with an API
+key. Without one (or offline) the tracker uses the annual average of the
+country (Ember, Yearly Electricity Data, 2025 or latest year; gCO2/kWh):
 
-Full list: 40+ zones in `carbon_tracker/carbon_api.py`.
+| Zone | Region | Built-in value |
+|------|--------|----------------|
+| `PL` | Poland | 589 |
+| `DE` | Germany | 330 |
+| `FR` | France | 41 |
+| `SE` | Sweden | 35 |
+| `GB` | United Kingdom | 217 |
+| `US` | United States | 384 |
+| `JP` | Japan | 477 |
+| `AU` | Australia | 525 |
+| `IN` | India | 670 |
+| `BR` | Brazil | 110 |
+
+Sub-national zones such as `US-CAL-CISO` or `CA-ON` use their country's value,
+and countries not in the table the world average (458). Full list:
+`_FALLBACK_INTENSITY` in `carbon_tracker/globals.py`.
 
 ---
 
@@ -716,6 +729,8 @@ CarbonFootprint/
 │   ├── project.py              # Project file management (.carbon.json)
 │   ├── cli.py                  # CLI entry point (argparse)
 │   └── gui.py                  # Desktop GUI (PyQt5)
+│
+├── tests/                      # pytest suite (pip install -e ".[dev]"; pytest)
 │
 ├── include/                    # C++ headers
 │   ├── carbon_api.h
@@ -767,7 +782,7 @@ tracker = CarbonTracker(
 | `stop()` → `SessionData` | Stop monitoring, return session data |
 | `add_app(name)` | Add an application to monitor |
 | `remove_app(name)` | Remove app (data preserved) |
-| `add_tab_filter(filter)` | Add browser tab keyword filter |
+| `add_tab_filter(browser, keyword)` | Add a browser tab keyword filter (also accepts a `BrowserTabFilter`) |
 | `get_snapshot()` → `dict` | Get current live stats |
 | `get_session_data()` → `SessionData` | Get finalized session data |
 | `project_future(hours)` → `ProjectionResult` | Forecast future emissions |
@@ -846,7 +861,7 @@ tracker.add(Activity.custom("My activity", co2_grams=100))
 from carbon_tracker.models import SessionData
 
 session = SessionData(
-    start_time="2025-06-15T10:00:00",
+    start_time=1750000000.0,     # Unix timestamp
     duration_seconds=7200,
     total_carbon_grams=25.4,
     total_energy_kwh=0.0682,
@@ -882,9 +897,9 @@ hw = HardwareInfo(
 from carbon_tracker.hardware import detect_hardware
 from carbon_tracker.carbon_api import auto_detect_zone, fetch_carbon_intensity
 
-hw = detect_hardware()                    # HardwareInfo
-zone = auto_detect_zone()                 # "PL"
-intensity = fetch_carbon_intensity(zone)  # 680.0 (gCO2/kWh)
+hw = detect_hardware()                              # HardwareInfo
+zone, where = auto_detect_zone()                    # ("PL", "Warsaw (PL)")
+intensity, is_live = fetch_carbon_intensity(zone)   # (589.0, False)
 ```
 
 ---
@@ -892,7 +907,7 @@ intensity = fetch_carbon_intensity(zone)  # 680.0 (gCO2/kWh)
 ## FAQ
 
 **Q: Do I need an API key?**  
-A: No. The tracker has built-in fallback intensity values for 40+ zones. An API key gives you live real-time data from Electricity Maps.
+A: No. The tracker has built-in intensity values for 50+ countries. An API key gives you live real-time data from Electricity Maps.
 
 **Q: Does it work on Linux/macOS?**  
 A: Yes. Hardware detection, process monitoring, and active window detection all have cross-platform implementations.

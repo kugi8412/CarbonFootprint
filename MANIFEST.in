@@ -1,4 +1,7 @@
 include README.md
+include INTRO.md
+include instruction.md
+include PUBLISHING.md
 include LICENSE
 include pyproject.toml
 include CMakeLists.txt
@@ -8,3 +11,6 @@ include build.sh
 recursive-include carbon_tracker *.py
 recursive-include include *.h
 recursive-include src *.cpp
+recursive-include tests *.py
+
+global-exclude *.py[cod] __pycache__

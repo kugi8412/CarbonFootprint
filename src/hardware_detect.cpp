@@ -1,14 +1,45 @@
 #include "hardware_detect.h"
+#include <cctype>
+#include <regex>
 
 // ============================================================
 // Hardware Detection Implementation
 // ============================================================
 
+// Upper bounds for TDPs reported by drivers; larger values are placeholders
+static constexpr double kCpuTdpMaxWatts = 500.0;
+static constexpr double kGpuTdpMaxWattsLaptop = 250.0;
+static constexpr double kGpuTdpMaxWatts = 1500.0;
+
 bool HardwareDetect::ContainsIgnoreCase(const std::string& haystack, const std::string& needle) {
     std::string h = haystack, n = needle;
-    std::transform(h.begin(), h.end(), h.begin(), ::tolower);
-    std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+    auto lower = [](unsigned char c) { return static_cast<char>(std::tolower(c)); };
+    std::transform(h.begin(), h.end(), h.begin(), lower);
+    std::transform(n.begin(), n.end(), n.begin(), lower);
     return h.find(n) != std::string::npos;
+}
+
+// Table patterns are case-insensitive regular expressions
+static bool MatchesTdpPattern(const std::string& name, const char* pattern) {
+    try {
+        return std::regex_search(name, std::regex(pattern, std::regex::icase));
+    } catch (const std::regex_error&) {
+        return false;
+    }
+}
+
+// 2 = discrete, 1 = integrated, 0 = virtual / basic display adapter.
+static int GpuRank(const std::string& name) {
+    std::string n = name;
+    std::transform(n.begin(), n.end(), n.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (const char* v : {"microsoft basic", "virtio", "vmware", "virtualbox", "parsec",
+                          "remote display", "hyper-v", "virtual"})
+        if (n.find(v) != std::string::npos) return 0;
+    for (const char* i : {"intel", "uhd", "iris", "radeon(tm) graphics", "radeon graphics",
+                          "780m", "760m", "680m", "890m"})
+        if (n.find(i) != std::string::npos) return 1;
+    return 2;
 }
 
 // CPU TDP Lookup Table
@@ -18,29 +49,27 @@ const std::vector<HardwareDetect::CpuTdpEntry>& HardwareDetect::GetCpuTdpTable()
         {"i9-14900K", 125}, {"i9-13900K", 125}, {"i9-12900K", 125}, {"i9-11900K", 125}, {"i9-10900K", 125},
         {"i7-14700K", 125}, {"i7-13700K", 125}, {"i7-12700K", 125}, {"i7-11700K", 125}, {"i7-10700K", 125},
         {"i5-14600K", 125}, {"i5-13600K", 125}, {"i5-12600K", 125}, {"i5-11600K", 125}, {"i5-10600K", 125},
-        // Intel Mobile HX (55W)
-        {"i9-14900HX", 55}, {"i9-13950HX", 55}, {"i9-13900HX", 55}, {"i7-14700HX", 55}, {"i7-13700HX", 55},
-        // Intel Mobile H (45W, full SKU incl. 11th/10th gen)
-        {"i9-11900H", 45}, {"i7-11850H", 45}, {"i7-11800H", 45}, {"i7-11375H", 35}, {"i5-11400H", 45}, {"i5-11260H", 45},
-        {"i9-10980HK", 45}, {"i7-10870H", 45}, {"i7-10750H", 45}, {"i5-10500H", 45}, {"i5-10300H", 45},
+        // Intel Mobile 10th-14th gen (HX 55W, H 45W, P 28W, U 15W, G-series 28W)
+        {R"(i[3579]-1[0-4]\d+HX)", 55},
+        {R"(i[57]-113\d\dH)", 35},  // 11th gen H35 (i7-11370H, i5-11320H)
+        {R"(i[3579]-1[0-4]\d+H)", 45},
+        {R"(i[3579]-1[0-4]\d+P)", 28}, {R"(i[3579]-1[0-4]\d+U)", 15},
+        {R"(i[3579]-1[0-4]\d+G\d)", 28},
         // Intel Desktop non-K (65W, full SKU)
         {"i9-14900", 65}, {"i9-13900", 65}, {"i9-12900", 65},
         {"i7-14700", 65}, {"i7-13700", 65}, {"i7-12700", 65},
         {"i5-14600", 65}, {"i5-14400", 65}, {"i5-13600", 65}, {"i5-13400", 65}, {"i5-12400", 65},
-        // Intel generic by generation (old version fallback)
-        {"i9-14", 45}, {"i7-14", 28}, {"i5-14", 28},
-        {"i9-13", 45}, {"i7-13", 28}, {"i5-13", 28},
-        {"i7-12", 28}, {"i5-12", 28},
-        {"i9-11", 45}, {"i7-11", 45}, {"i5-11", 45},
-        {"i9-10", 45}, {"i7-10", 45}, {"i5-10", 45},
-        {"i3-14", 60}, {"i3-13", 60}, {"i3-12", 60}, {"i3-11", 60}, {"i3-10", 60},
-        // Intel generic patterns
-        {"Core Ultra 9", 45}, {"Core Ultra 7", 28}, {"Core Ultra 5", 28},
+        // Intel desktop by generation (mobile parts are matched above)
+        {"i[579]-1[0-4]", 65}, {"i3-1[0-4]", 60},
+        // Intel Core Ultra (reported as "Core(TM) Ultra 7 155H")
+        {R"(Ultra [579] \d+K)", 125}, {R"(Ultra [579] \d+HX)", 55}, {R"(Ultra 9 \d+H)", 45},
+        {R"(Ultra [57] \d+H)", 28}, {R"(Ultra [579] \d+U)", 15}, {R"(Ultra [579] \d+V)", 17},
+        {"Ultra 9", 45}, {"Ultra [57]", 28},
         {"Xeon", 105}, {"Pentium", 35}, {"Celeron", 15},
         // AMD Ryzen Mobile
         {"7840U", 28}, {"7640U", 28}, {"7530U", 15}, {"6800U", 28},
-        {"Ryzen 9 7945HX", 55}, {"Ryzen 7 7840H", 45}, {"Ryzen 5 7640H", 45},
-        {"Ryzen 9 6900H", 45}, {"Ryzen 7 6800H", 45}, {"Ryzen 5 6600H", 45},
+        {R"(Ryzen [3579] \d+HX)", 55}, {R"(Ryzen [3579] \d+H)", 45},
+        {R"(Ryzen [3579] \d+U)", 28}, {"Ryzen AI", 28},
         // AMD Ryzen Desktop
         {"Ryzen 9 7950X", 170}, {"Ryzen 9 7900X", 170}, {"Ryzen 7 7700X", 105},
         {"Ryzen 5 7600X", 105}, {"Ryzen 9 5950X", 105}, {"Ryzen 9 5900X", 105},
@@ -64,6 +93,8 @@ const std::vector<HardwareDetect::GpuTdpEntry>& HardwareDetect::GetGpuTdpTable()
     static const std::vector<GpuTdpEntry> table = {
         // NVIDIA laptop GPUs - MUST precede desktop entries (substring match:
         // "RTX 4070 Laptop GPU" also contains "RTX 4070").
+        {"RTX 5090 Laptop", 175}, {"RTX 5080 Laptop", 175}, {"RTX 5070 Ti Laptop", 140},
+        {"RTX 5070 Laptop", 115}, {"RTX 5060 Laptop", 115},
         {"RTX 4090 Laptop", 150}, {"RTX 4080 Laptop", 150}, {"RTX 4070 Laptop", 115},
         {"RTX 4060 Laptop", 100}, {"RTX 4050 Laptop", 75},
         {"RTX 3080 Ti Laptop", 150}, {"RTX 3080 Laptop", 150}, {"RTX 3070 Ti Laptop", 125},
@@ -96,6 +127,7 @@ const std::vector<HardwareDetect::GpuTdpEntry>& HardwareDetect::GetGpuTdpTable()
         {"RX 6900 XT", 300}, {"RX 6800 XT", 300}, {"RX 6800", 250},
         {"RX 6700 XT", 230}, {"RX 6600 XT", 160}, {"RX 6600", 132},
         {"Radeon 780M", 15}, {"Radeon 760M", 15}, {"Radeon 680M", 15},
+        {R"(Radeon\(TM\) Graphics)", 15}, {"Radeon Graphics", 15},  // integrated
         {"Radeon", 150},
         // Intel Arc
         {"Arc A770", 225}, {"Arc A750", 225}, {"Arc A580", 185}, {"Arc A380", 75},
@@ -163,13 +195,23 @@ int HardwareDetect::DetectCpuThreads() {
 }
 
 std::string HardwareDetect::DetectGpuName() {
-    // Use DXGI to enumerate adapters
-    // Fallback: read from registry
+    // nvidia-smi also finds a discrete GPU that Optimus has powered down
+    FILE* nvPipe = _popen("nvidia-smi --query-gpu=name --format=csv,noheader 2>NUL", "r");
+    if (nvPipe) {
+        char buffer[256] = {};
+        std::string nvGpu;
+        if (fgets(buffer, sizeof(buffer), nvPipe) != nullptr) nvGpu = buffer;
+        _pclose(nvPipe);
+        nvGpu.erase(nvGpu.find_last_not_of(" \t\r\n") + 1);
+        if (!nvGpu.empty() && nvGpu.find("not recognized") == std::string::npos)
+            return nvGpu;
+    }
+
     HKEY hKey;
     std::string bestGpu;
 
-    // Enumerate display adapters from registry
-    for (int i = 0; i < 10; i++) {
+    // Otherwise the best of all display adapters
+    for (int i = 0; i < 32; i++) {
         std::string subKey = "SYSTEM\\CurrentControlSet\\Control\\Class\\"
             "{4d36e968-e325-11ce-bfc1-08002be10318}\\" +
             std::string(4 - std::to_string(i).length(), '0') + std::to_string(i);
@@ -181,10 +223,8 @@ std::string HardwareDetect::DetectGpuName() {
             if (RegQueryValueExA(hKey, "DriverDesc", NULL, &type,
                     (LPBYTE)value, &size) == ERROR_SUCCESS) {
                 std::string gpuName(value);
-                // Prefer discrete GPU over integrated
-                if (bestGpu.empty() ||
-                    (!ContainsIgnoreCase(gpuName, "Intel") && !ContainsIgnoreCase(gpuName, "UHD") &&
-                     !ContainsIgnoreCase(gpuName, "Iris"))) {
+                // Prefer discrete over integrated over virtual
+                if (bestGpu.empty() || GpuRank(gpuName) > GpuRank(bestGpu)) {
                     bestGpu = gpuName;
                 }
             }
@@ -287,9 +327,8 @@ std::string HardwareDetect::DetectGpuName() {
                 size_t end = gpu.find_last_not_of(" \t\n\r");
                 if (start != std::string::npos)
                     gpu = gpu.substr(start, end - start + 1);
-                // Prefer discrete GPU
-                if (bestGpu.empty() ||
-                    (!ContainsIgnoreCase(gpu, "Intel") && !ContainsIgnoreCase(gpu, "UHD"))) {
+                // Prefer discrete over integrated over virtual
+                if (bestGpu.empty() || GpuRank(gpu) > GpuRank(bestGpu)) {
                     bestGpu = gpu;
                 }
             }
@@ -311,6 +350,16 @@ bool HardwareDetect::DetectIsLaptop() {
             int type;
             chassis >> type;
             if (type == 9 || type == 10 || type == 14 || type == 31 || type == 32) return true;
+            return false;
+        }
+        // WSL2 has no DMI data: ask the Windows host for a battery
+        FILE* pipe = popen("powershell.exe -NoProfile -Command "
+                           "\"(Get-CimInstance Win32_Battery | Measure-Object).Count\" 2>/dev/null", "r");
+        if (pipe) {
+            char buf[32] = {};
+            bool hasBattery = fgets(buf, sizeof(buf), pipe) != nullptr && std::atoi(buf) > 0;
+            pclose(pipe);
+            return hasBattery;
         }
         return false;
     }
@@ -508,13 +557,18 @@ double HardwareDetect::DetectGpuTdpFromDevice() {
         double watts = 0.0;
         while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
             std::string line(buffer);
-            size_t p = line.find_first_of("0123456789.");
-            if (p != std::string::npos) {
-                try {
-                    double v = std::stod(line.substr(p));
-                    if (v > 0) { watts = v; break; }
-                } catch (...) {}
-            }
+            line.erase(line.find_last_not_of(" \t\r\n") + 1);
+            line.erase(0, line.find_first_not_of(" \t"));
+            // nvidia-smi prints only the number; rocm-smi "... Power (W): 300.0"
+            std::string num = line;
+            if (ContainsIgnoreCase(line, "power") && line.rfind(':') != std::string::npos)
+                num = line.substr(line.rfind(':') + 1);
+            try {
+                size_t used = 0;
+                double v = std::stod(num, &used);
+                while (used < num.size() && std::isspace(static_cast<unsigned char>(num[used]))) used++;
+                if (used == num.size() && v > 0) { watts = v; break; }
+            } catch (...) {}
         }
         CF_PCLOSE(pipe);
         if (watts > 0) return watts;
@@ -527,7 +581,7 @@ double HardwareDetect::DetectGpuTdpFromDevice() {
 double HardwareDetect::EstimateCpuTdp(const std::string& cpuName, int cores) {
     if (!cpuName.empty()) {
         for (const auto& entry : GetCpuTdpTable()) {
-            if (ContainsIgnoreCase(cpuName, entry.pattern)) {
+            if (MatchesTdpPattern(cpuName, entry.pattern)) {
                 return entry.tdpWatts;
             }
         }
@@ -543,7 +597,7 @@ double HardwareDetect::EstimateCpuTdp(const std::string& cpuName, int cores) {
 double HardwareDetect::EstimateGpuTdp(const std::string& gpuName) {
     if (!gpuName.empty()) {
         for (const auto& entry : GetGpuTdpTable()) {
-            if (ContainsIgnoreCase(gpuName, entry.pattern)) {
+            if (MatchesTdpPattern(gpuName, entry.pattern)) {
                 return entry.tdpWatts;
             }
         }
@@ -565,9 +619,13 @@ HardwareInfo HardwareDetect::DetectAll() {
     info.cpuThreads = DetectCpuThreads();
     info.cpuDetected = !info.cpuName.empty();
 
+    info.isLaptop = DetectIsLaptop();
+    info.laptopDetected = true;
+
     // Prefer the real package power limit reported by the device (RAPL),
     // fall back to the lookup table / core-count heuristic.
     double deviceCpuTdp = DetectCpuTdpFromDevice();
+    if (deviceCpuTdp > kCpuTdpMaxWatts) deviceCpuTdp = 0.0;  // unlocked limit
     if (deviceCpuTdp > 0.0) {
         info.cpuTdpWatts = deviceCpuTdp;
         info.cpuTdpMeasured = true;
@@ -579,8 +637,10 @@ HardwareInfo HardwareDetect::DetectAll() {
     info.gpuName = DetectGpuName();
     info.gpuDetected = !info.gpuName.empty();
 
-    // Prefer the real board power limit reported by the GPU driver.
+    // Prefer the board power limit reported by the GPU driver
     double deviceGpuTdp = DetectGpuTdpFromDevice();
+    if (deviceGpuTdp > (info.isLaptop ? kGpuTdpMaxWattsLaptop : kGpuTdpMaxWatts))
+        deviceGpuTdp = 0.0;
     if (deviceGpuTdp > 0.0) {
         info.gpuTdpWatts = deviceGpuTdp;
         info.gpuTdpMeasured = true;
@@ -591,8 +651,6 @@ HardwareInfo HardwareDetect::DetectAll() {
         info.gpuTdpMeasured = false;
     }
 
-    info.isLaptop = DetectIsLaptop();
-    info.laptopDetected = true;
     info.baseSystemWatts = EstimateBasePower(info.isLaptop);
 
     return info;

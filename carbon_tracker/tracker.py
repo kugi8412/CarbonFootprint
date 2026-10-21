@@ -29,6 +29,7 @@ from carbon_tracker.carbon_api import (
     auto_detect_zone,
     fetch_carbon_intensity,
     get_fallback_intensity,
+    normalize_zone,
 )
 
 from carbon_tracker.globals import (
@@ -37,15 +38,23 @@ from carbon_tracker.globals import (
     PERCENT_MAX,
     MIN_HOURS_EPSILON,
     API_UPDATE_INTERVAL_SEC,
-    API_SLEEP_TICK_SEC,
     CPU_POWER_CURVE_EXPONENT,
     CPU_IDLE_FRACTION,
     GPU_IDLE_FRACTION,
     PROJECTION_CPU_LOAD_ESTIMATE,
     MIN_SYSTEM_CPU_NOISE,
+    ACTIVE_APP_ENERGY_TAX,
     BACKGROUND_APP_ENERGY_TAX,
     POWER_MEASURE_INTERVAL_SEC,
+    OTHER_APP_NAME,
+    MAX_TICK_GAP_SEC,
 )
+
+
+def _app_key(name: str) -> str:
+    """Process key: lower case, without ".exe"."""
+    key = (name or "").strip().lower()
+    return key[:-4] if key.endswith(".exe") else key
 
 
 def _get_active_window_process() -> tuple:
@@ -156,7 +165,7 @@ def _scan_processes_cached(
     """
     result = {n: 0.0 for n in names}
     running = set()
-    lower_names = {n.lower().replace(".exe", ""): n for n in names}
+    lower_names = {_app_key(n): n for n in names}
 
     # On WSL, also check Windows processes
     if _is_wsl():
@@ -176,7 +185,7 @@ def _scan_processes_cached(
             # New PID: resolve its name once (the expensive part) and prime CPU.
             try:
                 proc = psutil.Process(pid)
-                name_lower = (proc.name() or "").lower().replace(".exe", "")
+                name_lower = _app_key(proc.name())
                 proc.cpu_percent(interval=0)
             except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
                 cache[pid] = None  # remember as unreadable; skip cheaply next time
@@ -281,7 +290,7 @@ def _get_wsl_windows_cpu(
     wsl_state["ts"] = now
 
     # Any present tracked process counts as running, even at 0% CPU.
-    for pname, canonical in lower_names.items():
+    for pname in lower_names:
         if pname in current:
             running.add(pname)
 
@@ -341,7 +350,13 @@ class CarbonTracker:
         tab_filters: Optional[List[BrowserTabFilter]] = None,
         on_update: Optional[Callable] = None,
     ):
-        self.apps: List[str] = list(apps) if apps else []
+        # One entry per process name ("Slack.exe" == "slack")
+        self.apps: List[str] = []
+        for name in apps or []:
+            if _app_key(name) and not any(
+                _app_key(a) == _app_key(name) for a in self.apps
+            ):
+                self.apps.append(name)
         self.api_key = api_key
         self.update_interval = update_interval
         self.tab_filters: List[BrowserTabFilter] = (
@@ -357,10 +372,10 @@ class CarbonTracker:
 
         # Zone detection
         if zone:
-            self.zone = zone
+            self.zone = normalize_zone(zone)
         else:
             detected, desc = auto_detect_zone()
-            self.zone = detected if detected else "PL"
+            self.zone = normalize_zone(detected) if detected else "PL"
 
         # Internal state
         self._app_data: Dict[str, AppUsageData] = {}
@@ -375,6 +390,10 @@ class CarbonTracker:
         self._intensity = get_fallback_intensity(self.zone)
         self._intensity_real = False
         self._previous_sessions: List[SessionData] = []
+        # Whole-system hourly buckets: hour -> [seconds, kWh, gCO2].
+        self._hourly: Dict[int, list] = {}
+        # psutil per-process CPU is per core, system CPU is over all cores
+        self._ncpu = psutil.cpu_count(logical=True) or 1
 
         # Power measurement state. When the battery exposes a discharge rate we
         # use that real wattage; otherwise we fall back to a TDP estimate and
@@ -424,16 +443,16 @@ class CarbonTracker:
 
     def add_app(self, name: str):
         with self._lock:
-            lower = name.lower()
-            if not any(a.lower() == lower for a in self.apps):
+            key = _app_key(name)
+            if key and not any(_app_key(a) == key for a in self.apps):
                 self.apps.append(name)
 
     def remove_app(self, name: str):
         with self._lock:
-            lower = name.lower()
-            self.apps = [a for a in self.apps if a.lower() != lower]
-            for key, data in self._app_data.items():
-                if key.lower().replace(".exe", "") == lower.replace(".exe", ""):
+            key = _app_key(name)
+            self.apps = [a for a in self.apps if _app_key(a) != key]
+            for app_name, data in self._app_data.items():
+                if _app_key(app_name) == key:
                     data.is_active = False
 
     def get_app_data(self) -> Dict[str, AppUsageData]:
@@ -461,8 +480,13 @@ class CarbonTracker:
         """Get current session data snapshot (works while running or after stop)."""
         return self._build_session()
 
-    def add_tab_filter(self, browser: str, keyword: str):
-        self.tab_filters.append(BrowserTabFilter(browser, keyword, True))
+    def add_tab_filter(self, browser, keyword: Optional[str] = None):
+        """Track ``browser`` only while its tab title contains ``keyword`` (any
+        of the keywords added for it). Also accepts a ``BrowserTabFilter``."""
+        if isinstance(browser, BrowserTabFilter):
+            self.tab_filters.append(browser)
+        else:
+            self.tab_filters.append(BrowserTabFilter(browser, keyword or "", True))
 
     def import_session(self, session: SessionData):
         self._previous_sessions.append(session)
@@ -540,7 +564,7 @@ class CarbonTracker:
             cpu_watts = self._measured_cpu_watts
         else:
             cpu_idle = self.hardware.cpu_tdp_watts * CPU_IDLE_FRACTION
-            cpu_usage_frac = min(system_cpu / PERCENT_MAX, API_SLEEP_TICK_SEC)
+            cpu_usage_frac = min(max(system_cpu, 0.0) / PERCENT_MAX, 1.0)
             cpu_watts = cpu_idle + (self.hardware.cpu_tdp_watts - cpu_idle) * (
                 cpu_usage_frac**CPU_POWER_CURVE_EXPONENT
             )
@@ -602,21 +626,37 @@ class CarbonTracker:
             return proj
 
     def _matches_tab_filter(self, app_name: str, window_title: str) -> bool:
-        app_lower = app_name.lower().replace(".exe", "")
-        for f in self.tab_filters:
-            if not f.enabled:
-                continue
+        app_lower = _app_key(app_name)
+        keywords = [
+            f.title_filter.lower()
+            for f in self.tab_filters
+            if f.enabled and _app_key(f.browser_process) == app_lower
+        ]
+        if not keywords:
+            return True  # no filter for this app
+        title = (window_title or "").lower()
+        return bool(title) and any(k in title for k in keywords)
 
-            browser_lower = f.browser_process.lower().replace(".exe", "")
-            if app_lower == browser_lower:
-                if not window_title:
-                    return False
-
-                return f.title_filter.lower() in window_title.lower()
-
-        return True  # no filter for this app
+    def _accumulate_app(
+        self, app_name: str, energy: float, cpu: float, seconds: float, hour: int
+    ):
+        """Add one tick to an app row (caller holds the lock)."""
+        carbon = energy * self._intensity
+        data = self._app_data.setdefault(app_name, AppUsageData(app_name=app_name))
+        data.total_active_seconds += seconds
+        data.total_energy_kwh += energy
+        data.total_carbon_grams += carbon
+        data.sample_count += 1
+        data.avg_cpu_percent = (
+            data.avg_cpu_percent * (data.sample_count - 1) + cpu
+        ) / data.sample_count
+        data.peak_cpu_percent = max(data.peak_cpu_percent, cpu)
+        data.carbon_by_hour[hour] = data.carbon_by_hour.get(hour, 0.0) + carbon
+        data.energy_by_hour[hour] = data.energy_by_hour.get(hour, 0.0) + energy
+        data.seconds_by_hour[hour] = data.seconds_by_hour.get(hour, 0.0) + seconds
 
     def _monitor_loop(self):
+        last_tick = time.monotonic()
         while self._running:
             try:
                 active_proc, window_title = _get_active_window_process()
@@ -628,83 +668,83 @@ class CarbonTracker:
                 per_app_cpu, running_procs = _scan_processes_cached(
                     apps_to_track, self._proc_cache, self._wsl_cpu_state
                 )
-                total_tracked_cpu = sum(per_app_cpu.values())
 
                 # On WSL, prefer the Windows-host system CPU% (derived from the
                 # same Get-Process sampling) so per-app energy allocation matches
                 # the host the tracked processes actually run on, not the VM.
+                ncpu = self._ncpu
                 wsl_sys_cpu = self._wsl_cpu_state.get("system_cpu")
                 if wsl_sys_cpu is not None:
                     system_cpu = wsl_sys_cpu
+                    ncpu = self._wsl_cpu_state.get("ncpu") or ncpu
 
                 # Power: measured from the battery when available, else estimated.
                 total_watts = self._compute_total_watts(system_cpu, time.time())
 
-                time_hours = self.update_interval / SECONDS_PER_HOUR
-                total_energy = (total_watts / WATTS_PER_KW) * time_hours
+                # Integrate over the real elapsed time, not the nominal interval
+                now = time.monotonic()
+                dt = now - last_tick
+                last_tick = now
+                if dt <= 0 or dt > max(MAX_TICK_GAP_SEC, 5 * self.update_interval):
+                    dt = self.update_interval  # suspended / clock jump
+
+                total_energy = (total_watts / WATTS_PER_KW) * (dt / SECONDS_PER_HOUR)
                 total_carbon = total_energy * self._intensity
 
                 hour = time.localtime().tm_hour
 
+                # Energy shares from per-process CPU scaled to all cores
+                shares: Dict[str, tuple] = {}
+                tracked_cpu = sum(per_app_cpu.values()) / ncpu
+                busy = (
+                    tracked_cpu > MIN_SYSTEM_CPU_NOISE
+                    and system_cpu > MIN_SYSTEM_CPU_NOISE
+                )
+                active_key = _app_key(active_proc)
+                for app_name in apps_to_track:
+                    app_cpu = per_app_cpu.get(app_name, 0.0)
+                    key = _app_key(app_name)
+                    if key not in running_procs and app_cpu <= 0:
+                        continue
+                    # A foreground browser on a non-matching tab gets nothing
+                    if (
+                        not self._matches_tab_filter(app_name, window_title)
+                        and active_key == key
+                    ):
+                        continue
+                    if busy:
+                        share = (app_cpu / ncpu) / max(system_cpu, tracked_cpu)
+                    elif active_key == key:
+                        share = ACTIVE_APP_ENERGY_TAX
+                    else:
+                        share = BACKGROUND_APP_ENERGY_TAX
+                    shares[app_name] = (share, app_cpu)
+
+                share_sum = sum(s for s, _ in shares.values())
+                scale = 1.0 / share_sum if share_sum > 1.0 else 1.0
+
                 with self._lock:
-                    self._total_seconds += self.update_interval
+                    self._total_seconds += dt
                     self._total_energy += total_energy
                     self._total_carbon += total_carbon
+                    bucket = self._hourly.setdefault(hour, [0.0, 0.0, 0.0])
+                    bucket[0] += dt
+                    bucket[1] += total_energy
+                    bucket[2] += total_carbon
 
-                    for app_name in apps_to_track:
-                        app_cpu = per_app_cpu.get(app_name, 0.0)
-
-                        # Check if running (use cached set)
-                        app_lower = app_name.lower().replace(".exe", "")
-                        running = app_lower in running_procs
-                        if not running and app_cpu <= 0:
-                            continue
-
-                        # Check tab filter
-                        if not self._matches_tab_filter(app_name, window_title):
-                            active_lower = (
-                                (active_proc or "").lower().replace(".exe", "")
-                            )
-                            if active_lower == app_lower:
-                                continue
-
-                        # Energy allocation
-                        if (
-                            total_tracked_cpu > MIN_SYSTEM_CPU_NOISE
-                            and system_cpu > MIN_SYSTEM_CPU_NOISE
-                        ):
-                            cpu_share = min(
-                                app_cpu / max(system_cpu, API_SLEEP_TICK_SEC),
-                                API_SLEEP_TICK_SEC,
-                            )
-                            app_energy = total_energy * cpu_share
-                        elif (
-                            active_proc
-                            and active_proc.lower().replace(".exe", "") == app_lower
-                        ):
-                            app_energy = total_energy * MIN_SYSTEM_CPU_NOISE
-                        else:
-                            app_energy = total_energy * BACKGROUND_APP_ENERGY_TAX
-
-                        app_carbon = app_energy * self._intensity
-
-                        data = self._app_data.setdefault(
-                            app_name, AppUsageData(app_name=app_name)
+                    for app_name, (share, app_cpu) in shares.items():
+                        self._accumulate_app(
+                            app_name, total_energy * share * scale, app_cpu, dt, hour
                         )
-                        data.total_active_seconds += self.update_interval
-                        data.total_energy_kwh += app_energy
-                        data.total_carbon_grams += app_carbon
-                        data.sample_count += 1
-                        data.avg_cpu_percent = (
-                            data.avg_cpu_percent * (data.sample_count - 1) + app_cpu
-                        ) / data.sample_count
-                        data.peak_cpu_percent = max(data.peak_cpu_percent, app_cpu)
-                        data.carbon_by_hour[hour] = (
-                            data.carbon_by_hour.get(hour, 0.0) + app_carbon
-                        )
-                        data.energy_by_hour[hour] = (
-                            data.energy_by_hour.get(hour, 0.0) + app_energy
-                        )
+                    # The rest goes to its own row, so the rows add up to the total
+                    other_cpu = max(system_cpu * ncpu - sum(per_app_cpu.values()), 0.0)
+                    self._accumulate_app(
+                        OTHER_APP_NAME,
+                        total_energy * max(1.0 - share_sum * scale, 0.0),
+                        other_cpu,
+                        dt,
+                        hour,
+                    )
 
                 if self.on_update:
                     try:
@@ -744,11 +784,19 @@ class CarbonTracker:
             session.total_energy_kwh = self._total_energy
             session.total_carbon_grams = self._total_carbon
             session.zone = self.zone
-            session.avg_intensity = self._intensity
+            # Energy-weighted mean over the session
+            session.avg_intensity = (
+                self._total_carbon / self._total_energy
+                if self._total_energy > 0
+                else self._intensity
+            )
             session.hardware = self.hardware
             # Only include apps that have actual recorded data
             session.apps = {
                 k: v for k, v in self._app_data.items()
                 if v.total_active_seconds > 0 or v.total_carbon_grams > 0
             }
+            session.seconds_by_hour = {h: b[0] for h, b in self._hourly.items()}
+            session.energy_by_hour = {h: b[1] for h, b in self._hourly.items()}
+            session.carbon_by_hour = {h: b[2] for h, b in self._hourly.items()}
             return session

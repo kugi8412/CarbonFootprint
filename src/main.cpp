@@ -15,7 +15,7 @@
 static CarbonEngine* g_engine = nullptr;
 
 #ifndef CARBON_VERSION
-#define CARBON_VERSION "1.1.5"
+#define CARBON_VERSION "1.6.0"
 #endif
 
 static void PrintBanner() {
@@ -80,12 +80,9 @@ static void AddApplication(std::vector<std::string>& apps) {
         return;
     }
 
-    // Check for duplicates
+    // Check for duplicates ("Slack.exe" == "slack")
     for (const auto& a : apps) {
-        std::string l1 = a, l2 = appName;
-        std::transform(l1.begin(), l1.end(), l1.begin(), ::tolower);
-        std::transform(l2.begin(), l2.end(), l2.begin(), ::tolower);
-        if (l1 == l2) {
+        if (AppKey(a) == AppKey(appName)) {
             std::cout << "Application '" << appName << "' is already in the list.\n";
             return;
         }
@@ -162,7 +159,7 @@ static void SetZone(std::string& zone) {
     } catch (...) {}
 
     // Treat as zone code
-    zone = input;
+    zone = CarbonAPI::NormalizeZone(input);
     std::cout << "Zone set to: " << zone << "\n";
 }
 
@@ -187,19 +184,25 @@ static void ConfigureSystem(EngineConfig& config) {
             case 1: {
                 std::cout << "Enter CPU TDP in Watts (typical: 15-125):\n> ";
                 std::getline(std::cin, input);
-                config.cpuTdpWatts = std::stod(input);
+                double v = std::stod(input);
+                if (v >= 0 && v <= 1000) config.cpuTdpWatts = v;
+                else std::cout << "Invalid TDP. Must be 0-1000 W.\n";
                 break;
             }
             case 2: {
                 std::cout << "Enter GPU TDP in Watts (typical: 75-350, 0 for integrated):\n> ";
                 std::getline(std::cin, input);
-                config.gpuTdpWatts = std::stod(input);
+                double v = std::stod(input);
+                if (v >= 0 && v <= 1500) config.gpuTdpWatts = v;
+                else std::cout << "Invalid TDP. Must be 0-1500 W.\n";
                 break;
             }
             case 3: {
                 std::cout << "Enter base system power in Watts (typical: 20-50):\n> ";
                 std::getline(std::cin, input);
-                config.baseSystemWatts = std::stod(input);
+                double v = std::stod(input);
+                if (v >= 0 && v <= 500) config.baseSystemWatts = v;
+                else std::cout << "Invalid power. Must be 0-500 W.\n";
                 break;
             }
             case 4: {
@@ -263,11 +266,13 @@ static void ImportPreviousSession(std::vector<PreviousSession>& sessions) {
     std::getline(std::cin, input);
     try { s.durationSeconds = std::stod(input) * 3600.0; }
     catch (...) { std::cout << "Invalid. Cancelled.\n"; return; }
+    if (s.durationSeconds <= 0) { std::cout << "Duration must be > 0. Cancelled.\n"; return; }
 
     std::cout << "Total CO2 in grams (e.g., 15.5):\n> ";
     std::getline(std::cin, input);
     try { s.carbonGrams = std::stod(input); }
     catch (...) { std::cout << "Invalid. Cancelled.\n"; return; }
+    if (s.carbonGrams < 0) { std::cout << "CO2 must be >= 0. Cancelled.\n"; return; }
 
     std::cout << "Total energy in Wh (e.g., 45.2)  [enter 0 to auto-estimate]:\n> ";
     std::getline(std::cin, input);
@@ -606,12 +611,14 @@ static void LiveInteractionLoop(CarbonEngine& engine) {
             std::cout << "  Duration in hours:\n  > ";
             std::getline(std::cin, inp);
             try { s.durationSeconds = std::stod(inp) * 3600.0; }
-            catch (...) { std::cout << "  Invalid. Cancelled.\n"; std::cout << "  > "; continue; }
+            catch (...) { s.durationSeconds = -1; }
+            if (s.durationSeconds <= 0) { std::cout << "  Invalid. Cancelled.\n"; std::cout << "  > "; continue; }
 
             std::cout << "  Total CO2 in grams:\n  > ";
             std::getline(std::cin, inp);
             try { s.carbonGrams = std::stod(inp); }
-            catch (...) { std::cout << "  Invalid. Cancelled.\n"; std::cout << "  > "; continue; }
+            catch (...) { s.carbonGrams = -1; }
+            if (s.carbonGrams < 0) { std::cout << "  Invalid. Cancelled.\n"; std::cout << "  > "; continue; }
 
             std::cout << "  Total energy in Wh (0 to auto-estimate):\n  > ";
             std::getline(std::cin, inp);
@@ -649,10 +656,12 @@ static void StartMonitoring(EngineConfig& config, std::vector<PreviousSession>& 
         return;
     }
 
+    bool daemonized = false;
     if (asDaemon) {
 #ifndef PLATFORM_WINDOWS
         std::cout << "\nStarting as background daemon...\n";
-        if (!Daemon::Daemonize()) {
+        daemonized = Daemon::Daemonize();
+        if (!daemonized) {
             std::cerr << "Failed to daemonize. Running in foreground instead.\n";
         }
 #else
@@ -667,32 +676,69 @@ static void StartMonitoring(EngineConfig& config, std::vector<PreviousSession>& 
         g_engine->AddPreviousSession(s);
     }
 
+    // The handler only sets the stop flag; the main thread joins and saves
     Daemon::InstallSignalHandlers([]() {
         if (g_engine) {
-            g_engine->Stop();
+            g_engine->RequestStop();
         }
     });
 
     g_engine->Start();
 
-    // Run interactive command loop on the main thread
-    LiveInteractionLoop(*g_engine);
-
-    if (g_engine->IsRunning()) {
-        g_engine->Stop();
+    if (daemonized) {
+        // A daemon has no stdin: run until SIGTERM/SIGINT
+        while (g_engine->IsRunning()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    } else {
+        // Run interactive command loop on the main thread
+        LiveInteractionLoop(*g_engine);
     }
+
+    g_engine->Stop();
 
     // Generate and print report
     std::cout << "\n";
     ReportGenerator::PrintReport(*g_engine);
     ReportGenerator::SaveReport(*g_engine);
     ReportGenerator::SaveReportJson(*g_engine);
+    Daemon::NotifyShutdownComplete();
 
     delete g_engine;
     g_engine = nullptr;
 }
 
+static void PrintUsage() {
+    std::cout << "Carbon Footprint Tracker v" << CARBON_VERSION << "\n\n";
+    std::cout << "Usage: carbon_tracker [options]\n\n";
+    std::cout << "Options:\n";
+    std::cout << "  --start         Start monitoring immediately\n";
+    std::cout << "  --daemon        Run as background daemon (Linux/Mac)\n";
+    std::cout << "  --zone XX       Set electricity grid zone (e.g., PL, DE, US-CAL-CISO)\n";
+    std::cout << "  --apikey KEY    Set Electricity Maps API key\n";
+    std::cout << "  --app NAME      Add application to monitor (can be repeated)\n";
+    std::cout << "  --cpu-tdp W     Set CPU TDP in Watts (auto-detected by default)\n";
+    std::cout << "  --gpu-tdp W     Set GPU TDP in Watts (auto-detected by default)\n";
+    std::cout << "  --interval S    Set update interval in seconds (default: 2)\n";
+    std::cout << "  --desktop       Set system type to desktop (auto-detected by default)\n";
+    std::cout << "  --filter BROWSER KEYWORD  Add browser tab filter\n";
+    std::cout << "  --version       Show the version\n";
+    std::cout << "  --help, -h      Show this help\n";
+    std::cout << "\nHardware power and country/zone are auto-detected at startup.\n";
+    std::cout << "During monitoring, type 'help' for live commands:\n";
+    std::cout << "  add/remove apps, status, detail, filter, project, import, stop\n";
+}
+
 int main(int argc, char* argv[]) {
+    // --help/--version before auto-detection; no IP lookup when --zone is given
+    bool zoneGiven = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h") { PrintUsage(); return 0; }
+        if (arg == "--version") { std::cout << "carbon_tracker " << CARBON_VERSION << "\n"; return 0; }
+        if (arg == "--zone") zoneGiven = true;
+    }
+
     EngineConfig config;
     config.zone = "PL";
     config.apiKey = "";
@@ -703,7 +749,7 @@ int main(int argc, char* argv[]) {
     config.isLaptop = true;
     config.autoDetectedHardware = false;
 
-    // Start with no apps — user picks them
+    // Start with no apps, the user picks them
     config.targetApps = {};
 
     // Previous sessions storage
@@ -717,16 +763,32 @@ int main(int argc, char* argv[]) {
     config.baseSystemWatts = hwInfo.baseSystemWatts;
     config.isLaptop = hwInfo.isLaptop;
     config.autoDetectedHardware = hwInfo.cpuDetected || hwInfo.gpuDetected;
+    config.cpuName = hwInfo.cpuName;
+    config.gpuName = hwInfo.gpuName;
+    config.cpuCores = hwInfo.cpuCores;
 
     // === AUTO-DETECT COUNTRY/ZONE ===
-    std::cout << "Detecting location for carbon intensity...\n";
-    std::string detectedZone = CarbonAPI::AutoDetectZone();
-    if (!detectedZone.empty()) {
-        config.zone = detectedZone;
+    if (!zoneGiven) {
+        std::cout << "Detecting location for carbon intensity...\n";
+        std::string detectedZone = CarbonAPI::AutoDetectZone();
+        if (!detectedZone.empty()) {
+            config.zone = detectedZone;
+        }
     }
 
     // Command-line quick start
     if (argc > 1) {
+        // Reject non-numeric or out-of-range values
+        auto parseNumber = [](const char* flag, const char* text, double lo, double hi) {
+            try {
+                size_t used = 0;
+                double v = std::stod(text, &used);
+                if (used == std::strlen(text) && v >= lo && v <= hi) return v;
+            } catch (...) {}
+            std::cerr << "Invalid value for " << flag << ": '" << text
+                      << "' (expected " << lo << " to " << hi << ")\n";
+            std::exit(2);
+        };
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--zone" && i + 1 < argc) {
@@ -734,15 +796,20 @@ int main(int argc, char* argv[]) {
             } else if (arg == "--apikey" && i + 1 < argc) {
                 config.apiKey = argv[++i];
             } else if (arg == "--cpu-tdp" && i + 1 < argc) {
-                config.cpuTdpWatts = std::stod(argv[++i]);
+                config.cpuTdpWatts = parseNumber("--cpu-tdp", argv[++i], 0, 1000);
             } else if (arg == "--gpu-tdp" && i + 1 < argc) {
-                config.gpuTdpWatts = std::stod(argv[++i]);
+                config.gpuTdpWatts = parseNumber("--gpu-tdp", argv[++i], 0, 1500);
             } else if (arg == "--interval" && i + 1 < argc) {
-                config.updateIntervalSeconds = std::stoi(argv[++i]);
+                config.updateIntervalSeconds =
+                    static_cast<int>(parseNumber("--interval", argv[++i], 1, 3600));
             } else if (arg == "--app" && i + 1 < argc) {
-                config.targetApps.push_back(argv[++i]);
+                std::string app = argv[++i];
+                bool dup = false;
+                for (const auto& a : config.targetApps) dup = dup || AppKey(a) == AppKey(app);
+                if (!dup) config.targetApps.push_back(app);
             } else if (arg == "--desktop") {
                 config.isLaptop = false;
+                config.baseSystemWatts = HardwareDetect::EstimateBasePower(false);
             } else if (arg == "--filter" && i + 2 < argc) {
                 std::string browser = argv[++i];
                 std::string keyword = argv[++i];
@@ -751,27 +818,10 @@ int main(int argc, char* argv[]) {
                 // handled below
             } else if (arg == "--start") {
                 // handled below
-            } else if (arg == "--help" || arg == "-h") {
-                std::cout << "Carbon Footprint Tracker v" << CARBON_VERSION << "\n\n";
-                std::cout << "Usage: carbon_tracker [options]\n\n";
-                std::cout << "Options:\n";
-                std::cout << "  --start         Start monitoring immediately\n";
-                std::cout << "  --daemon        Run as background daemon (Linux/Mac)\n";
-                std::cout << "  --zone XX       Set electricity grid zone (e.g., PL, DE, US-CAL)\n";
-                std::cout << "  --apikey KEY    Set Electricity Maps API key\n";
-                std::cout << "  --app NAME      Add application to monitor (can be repeated)\n";
-                std::cout << "  --cpu-tdp W     Set CPU TDP in Watts (auto-detected by default)\n";
-                std::cout << "  --gpu-tdp W     Set GPU TDP in Watts (auto-detected by default)\n";
-                std::cout << "  --interval S    Set update interval in seconds (default: 2)\n";
-                std::cout << "  --desktop       Set system type to desktop (auto-detected by default)\n";
-                std::cout << "  --filter BROWSER KEYWORD  Add browser tab filter\n";
-                std::cout << "  --help, -h      Show this help\n";
-                std::cout << "\nHardware power and country/zone are auto-detected at startup.\n";
-                std::cout << "During monitoring, type 'help' for live commands:\n";
-                std::cout << "  add/remove apps, status, detail, filter, project, import, stop\n";
-                return 0;
             }
         }
+
+        config.zone = CarbonAPI::NormalizeZone(config.zone);
 
         bool startNow = false;
         bool daemon = false;
@@ -826,6 +876,9 @@ int main(int argc, char* argv[]) {
                     config.gpuTdpWatts = hwInfo.gpuTdpWatts;
                     config.baseSystemWatts = hwInfo.baseSystemWatts;
                     config.isLaptop = hwInfo.isLaptop;
+                    config.cpuName = hwInfo.cpuName;
+                    config.gpuName = hwInfo.gpuName;
+                    config.cpuCores = hwInfo.cpuCores;
                     HardwareDetect::PrintDetectedHardware(hwInfo);
                     break;
                 }

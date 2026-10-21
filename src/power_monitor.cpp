@@ -106,11 +106,16 @@ static double CF_ReadLinuxBatteryPower() {
 
 // ============================================================
 
-PowerMonitor::PowerMonitor(double cpuTdp, double gpuTdp, double basePower)
+static constexpr double kSensorCacheSec = 10.0;
+
+PowerMonitor::PowerMonitor(double cpuTdp, double gpuTdp, double basePower, bool isLaptop)
     : cpuTdpWatts_(cpuTdp), gpuTdpWatts_(gpuTdp), baseSystemWatts_(basePower),
+      isLaptop_(isLaptop),
       nvmlInitialized_(false), lastRaplEnergy_(0), lastRaplTime_(0),
       lastBatteryTime_(0), lastBatteryWatts_(-1.0),
-      lastSensorProbeTime_(0), sensorAvailable_(false) {
+      lastSensorProbeTime_(0), sensorAvailable_(false),
+      lastGpuTime_(0), lastGpuWatts_(-1.0),
+      lastSensorTime_(0), lastSensorWatts_(-1.0) {
 
 #ifdef HAS_NVML
     nvmlReturn_t result = nvmlInit();
@@ -150,6 +155,11 @@ long long PowerMonitor::ReadRaplEnergyMicroJoules() {
             // not subzones such as "intel-rapl:0:0".
             if (name.rfind("intel-rapl:", 0) != 0) continue;
             if (std::count(name.begin(), name.end(), ':') != 1) continue;
+            // CPU packages only (skip "psys", the whole platform)
+            std::ifstream nameFile(std::string(base) + "/" + name + "/name");
+            std::string domainName;
+            if (nameFile && std::getline(nameFile, domainName) &&
+                domainName.rfind("package", 0) != 0) continue;
             std::ifstream f(std::string(base) + "/" + name + "/energy_uj");
             long long e = 0;
             if (f >> e) { total += e; found = true; }
@@ -169,12 +179,14 @@ long long PowerMonitor::ReadRaplEnergyMicroJoules() {
 
 double PowerMonitor::ReadWindowsSensorCpuPower() {
 #ifdef PLATFORM_WINDOWS
+    // Identifier looks like "/intelcpu/0/power/0"; skip GPU packages
     auto query = [&](const std::string& ns) -> double {
         std::string cmd =
             "powershell.exe -NoProfile -Command \""
             "Get-CimInstance -Namespace " + ns + " -ClassName Sensor "
             "-ErrorAction SilentlyContinue | Where-Object { "
-            "$_.SensorType -eq 'Power' -and $_.Name -match 'Package' } | "
+            "$_.SensorType -eq 'Power' -and $_.Name -match 'Package' "
+            "-and $_.Identifier -match 'cpu/' } | "
             "Sort-Object Value -Descending | "
             "Select-Object -First 1 -ExpandProperty Value\"";
         std::string out;
@@ -185,9 +197,13 @@ double PowerMonitor::ReadWindowsSensorCpuPower() {
 
     double now = TimeUtil::SecondsSinceEpoch();
 
-    // Fast path: query the namespace we already found.
+    // Fast path: query the namespace we already found (cached briefly).
     if (sensorAvailable_ && !sensorNamespace_.empty()) {
+        if (lastSensorTime_ > 0 && (now - lastSensorTime_) < kSensorCacheSec)
+            return lastSensorWatts_;
         double w = query(sensorNamespace_);
+        lastSensorTime_ = now;
+        lastSensorWatts_ = w;
         if (w > 0) return w;
         sensorAvailable_ = false;
         sensorNamespace_.clear();
@@ -220,11 +236,11 @@ double PowerMonitor::ReadMeasuredCpuPower(std::string& source) {
         double timeDelta = currentTime - lastRaplTime_;
         if (timeDelta > 0.05) {
             long long energyDelta = currentEnergy - (long long)lastRaplEnergy_;
-            if (energyDelta < 0) energyDelta += (1LL << 32);  // counter wrap
             double watts = (energyDelta / 1000000.0) / timeDelta;
             lastRaplEnergy_ = (double)currentEnergy;
             lastRaplTime_ = currentTime;
-            if (watts > 0) { source = "rapl"; return watts; }
+            // Skip a tick when the counter wrapped
+            if (energyDelta > 0 && watts > 0) { source = "rapl"; return watts; }
         }
     }
     if (currentEnergy > 0) {
@@ -250,14 +266,35 @@ double PowerMonitor::ReadMeasuredGpuPower(std::string& source) {
         }
     }
 #endif
-    // nvidia-smi works even without an NVML build (driver ships it).
+    // nvidia-smi works even without an NVML build (driver ships it); the
+    // reading is cached for kSensorCacheSec
+    double now = TimeUtil::SecondsSinceEpoch();
+    if (lastGpuTime_ > 0 && (now - lastGpuTime_) < kSensorCacheSec) {
+        source = lastGpuSource_;
+        return lastGpuWatts_;
+    }
+    lastGpuTime_ = now;
+    lastGpuWatts_ = -1.0;
+    lastGpuSource_.clear();
     std::string out;
     std::string cmd =
         std::string("nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits")
         + CF_NULLSINK;
     if (CF_RunCommand(cmd, out)) {
-        double w = CF_ParseFirstDouble(out);
-        if (w > 0) { source = "nvidia-smi"; return w; }
+        // Sum all GPUs; "[N/A]" lines are skipped
+        double total = 0.0;
+        std::istringstream iss(out);
+        std::string line;
+        while (std::getline(iss, line)) {
+            double w = CF_ParseFirstDouble(line);
+            if (w > 0 && w <= 1500.0) total += w;
+        }
+        if (total > 0) {
+            lastGpuWatts_ = total;
+            lastGpuSource_ = "nvidia-smi";
+            source = lastGpuSource_;
+            return total;
+        }
     }
     return -1.0;
 }
@@ -361,7 +398,7 @@ PowerReading PowerMonitor::GetCurrentPower(double cpuUsagePercent, double screen
     r.cpuMeasured = (cpuSrc != "estimate");
     r.gpuMeasured = (gpuSrc != "estimate");
 
-    r.screenWatts = ScreenMonitor::EstimateScreenPower(screenBrightness);
+    r.screenWatts = ScreenMonitor::EstimateScreenPower(screenBrightness, isLaptop_);
     r.otherWatts = baseSystemWatts_;  // RAM, disks, fans, PSU inefficiency
     r.totalWatts = r.cpuWatts + r.gpuWatts + r.screenWatts + r.otherWatts;
 

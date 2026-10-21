@@ -37,6 +37,7 @@ from carbon_tracker.hpc import (
 )
 
 __all__ = [
+    "__version__",
     "CarbonTracker",
     "CarbonProject",
     "Activity",

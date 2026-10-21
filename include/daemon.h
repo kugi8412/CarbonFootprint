@@ -11,11 +11,14 @@ public:
     static bool Daemonize();
     static void InstallSignalHandlers(std::function<void()> onStop);
     static bool IsDaemon();
+    // Main thread: the report is written; a window-close handler may return.
+    static void NotifyShutdownComplete();
 
 private:
     static std::function<void()> stopCallback_;
     static bool isDaemon_;
     static std::atomic<bool> stopFired_;
+    static std::atomic<bool> shutdownComplete_;
 
 #ifdef PLATFORM_WINDOWS
     static BOOL WINAPI ConsoleHandler(DWORD signal);

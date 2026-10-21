@@ -6,10 +6,12 @@ CLI entry point for carbon-tracker.
 """
 
 import time
+import json
 import argparse
 import sys
 
 from carbon_tracker import CarbonTracker, CarbonProject
+from carbon_tracker.models import SessionData
 from carbon_tracker._version import __version__
 
 
@@ -44,7 +46,16 @@ def main():
     proj.add_argument("action", choices=["create", "info", "add-session", "forecast"])
     proj.add_argument("file", help="Project file (.carbon.json)")
     proj.add_argument("--name", default="My Project", help="Project name (for create)")
+    proj.add_argument("--description", default="", help="Project description (for create)")
+    proj.add_argument("--zone", default=None, help="Electricity zone stored in the project")
     proj.add_argument("--hours", type=float, default=8.0, help="Hours to forecast")
+    proj.add_argument(
+        "--session", default=None,
+        help="add-session: session report / project JSON to merge in",
+    )
+    proj.add_argument("--duration", type=float, default=None, help="add-session: seconds")
+    proj.add_argument("--carbon", type=float, default=None, help="add-session: grams CO2")
+    proj.add_argument("--energy", type=float, default=None, help="add-session: Wh")
 
     _ = sub.add_parser("detect", help="Auto-detect hardware and location")
 
@@ -118,15 +129,27 @@ def _cmd_monitor(args):
         print("No apps specified. Use --app <name> to add apps to monitor.")
         print("Example: carbon-tracker monitor --app firefox.exe --app code.exe")
         return
+    if args.interval <= 0:
+        print("--interval must be > 0 seconds.")
+        return
+
+    # All sessions of a project use the project's zone
+    proj = None
+    if args.project:
+        try:
+            proj = CarbonProject.load(args.project)
+        except FileNotFoundError:
+            proj = CarbonProject(name=args.project.replace(".carbon.json", ""))
+    zone = args.zone or (proj.zone if proj else None)
 
     tracker = CarbonTracker(
         apps=args.app,
-        zone=args.zone,
+        zone=zone,
         api_key=args.api_key,
         update_interval=args.interval,
     )
 
-    print(f"Carbon Footprint Tracker")
+    print("Carbon Footprint Tracker")
     print(f"  Zone:     {tracker.zone}")
     print(
         f"  CPU:      {tracker.hardware.cpu_name} ({tracker.hardware.cpu_tdp_watts}W)"
@@ -136,7 +159,7 @@ def _cmd_monitor(args):
     )
     print(f"  Type:     {'Laptop' if tracker.hardware.is_laptop else 'Desktop'}")
     print(f"  Apps:     {', '.join(args.app)}")
-    print(f"\nStarting... Press Ctrl+C to stop.\n")
+    print("\nStarting... Press Ctrl+C to stop.\n")
 
     tracker.start()
 
@@ -163,7 +186,7 @@ def _cmd_monitor(args):
                 (int(elapsed) % 3600) // 60,
                 int(elapsed) % 60,
             )
-            pwr = "battery" if not snap["power_estimated"] else "est"
+            pwr = "meas" if not snap["power_estimated"] else "est"
             print(
                 f"\r  {h}h{m:02d}m{s:02d}s | "
                 f"CO2: {snap['total_carbon_grams']:.3f}g | "
@@ -180,11 +203,13 @@ def _cmd_monitor(args):
     session = tracker.stop()
     print(f"\n{session.summary()}")
 
-    if args.project:
+    if proj is not None:
         try:
-            proj = CarbonProject.load(args.project)
+            proj = CarbonProject.load(args.project)  # pick up changes made meanwhile
         except FileNotFoundError:
-            proj = CarbonProject(name=args.project.replace(".carbon.json", ""))
+            pass
+        if not proj.zone:
+            proj.zone = session.zone
         proj.add_session(session)
         proj.save(args.project)
         print(f"\nSession saved to {args.project}")
@@ -192,7 +217,8 @@ def _cmd_monitor(args):
 
 def _cmd_project(args):
     if args.action == "create":
-        proj = CarbonProject(name=args.name)
+        proj = CarbonProject(name=args.name, description=args.description)
+        proj.zone = args.zone or ""
         proj.save(args.file)
         print(f"Created project: {args.file}")
 
@@ -200,7 +226,49 @@ def _cmd_project(args):
         proj = CarbonProject.load(args.file)
         print(proj.summary())
 
+    elif args.action == "add-session":
+        proj = CarbonProject.load(args.file)
+        sessions = []
+        if args.session:
+            with open(args.session, encoding="utf-8") as f:
+                data = json.load(f)
+            if "sessions" in data:
+                sessions = [SessionData.from_dict(s) for s in data["sessions"]]
+            elif "session_id" in data:
+                sessions = [SessionData.from_dict(data)]
+            if not sessions:
+                print(f"No sessions found in {args.session}.")
+                return
+        elif args.duration is not None and args.carbon is not None:
+            if args.duration <= 0 or args.carbon < 0 or (args.energy or 0) < 0:
+                print("--duration must be > 0; --carbon and --energy must be >= 0.")
+                return
+            now = time.time()
+            s = SessionData(
+                session_id=f"manual_{int(now)}",
+                description="Manual session",
+                start_time=now - args.duration,
+                end_time=now,
+                duration_seconds=args.duration,
+                total_carbon_grams=args.carbon,
+                total_energy_kwh=(args.energy or 0.0) / 1000.0,
+                zone=proj.zone,
+            )
+            if s.total_energy_kwh > 0:
+                s.avg_intensity = s.total_carbon_grams / s.total_energy_kwh
+            sessions = [s]
+        else:
+            print("Use --session FILE, or --duration SEC --carbon G [--energy WH].")
+            return
+        added = sum(1 for s in sessions if proj.add_session(s))
+        proj.save(args.file)
+        print(f"Added {added} session(s) to {args.file}"
+              + (f" ({len(sessions) - added} already present)" if added < len(sessions) else ""))
+
     elif args.action == "forecast":
+        if args.hours <= 0:
+            print("--hours must be > 0.")
+            return
         proj = CarbonProject.load(args.file)
         result = proj.project_future(args.hours)
         method = result.get("method", "average")
@@ -236,7 +304,7 @@ def _cmd_project(args):
                 print(
                     f"    {name:25s} "
                     f"CO2={app['projected_carbon_grams']:.2f}g  "
-                    f"(±{(app['rate_std_grams_per_hour'] * result['projected_hours']):.2f}g)  "
+                    f"({app['carbon_low_grams']:.2f}-{app['carbon_high_grams']:.2f}g)  "
                     f"Energy={app['projected_energy_kwh'] * 1000:.2f}Wh"
                 )
 
@@ -318,6 +386,11 @@ def _cmd_hpc(args):
         job.job_id = args.job_id
         if not job.scheduler:
             job.scheduler = "slurm"
+    elif not job.cpu_model:
+        # Work on this machine (not --job-id, often reported from a login node)
+        from carbon_tracker.hardware import detect_cpu_name
+
+        job.cpu_model = detect_cpu_name()
 
     measured_energy = None
     measured_source = ""
@@ -333,18 +406,22 @@ def _cmd_hpc(args):
         print(f"\n[carbon] Command exited with code {exit_code} after "
               f"{elapsed:.1f}s.\n")
 
-    report = build_hpc_report(
-        job=job,
-        elapsed_seconds=elapsed,
-        zone=args.zone,
-        api_key=args.api_key,
-        pue=pue,
-        cpu_utilization=cpu_util,
-        gpu_utilization=gpu_util,
-        measured_energy_kwh=measured_energy,
-        measured_source=measured_source,
-        use_sacct=not args.no_sacct,
-    )
+    try:
+        report = build_hpc_report(
+            job=job,
+            elapsed_seconds=elapsed,
+            zone=args.zone,
+            api_key=args.api_key,
+            pue=pue,
+            cpu_utilization=cpu_util,
+            gpu_utilization=gpu_util,
+            measured_energy_kwh=measured_energy,
+            measured_source=measured_source,
+            use_sacct=not args.no_sacct,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(2)
 
     print(report.summary())
     print()
@@ -357,6 +434,16 @@ def _cmd_hpc(args):
     if args.action == "run":
         # Propagate the wrapped command's exit status to the scheduler.
         sys.exit(exit_code)
+
+
+def gui_main():
+    """Entry point of ``carbon-tracker-gui``."""
+    try:
+        from carbon_tracker.gui import main as run_gui
+    except ImportError as e:
+        print(e)
+        sys.exit(1)
+    run_gui()
 
 
 if __name__ == "__main__":

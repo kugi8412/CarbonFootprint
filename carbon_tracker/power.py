@@ -166,13 +166,28 @@ def read_battery_status() -> dict:
 
 def read_gpu_power_draw() -> Optional[float]:
     """Real-time GPU power draw in watts from the driver (works even when the
-    GPU does not expose a power *limit*, e.g. many laptop GPUs). Returns watts
-    or None."""
-    watts = _run_first_float(
-        ["nvidia-smi", "--query-gpu=power.draw",
-         "--format=csv,noheader,nounits"]
-    )
-    if watts is not None and watts > 0:
+    GPU does not expose a power *limit*, e.g. many laptop GPUs). Sums all
+    NVIDIA GPUs. Returns watts or None."""
+    from carbon_tracker.globals import GPU_TDP_MAX_WATTS
+
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=power.draw",
+             "--format=csv,noheader,nounits"],
+            text=True, stderr=subprocess.DEVNULL, timeout=6,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired,
+            subprocess.CalledProcessError, OSError):
+        out = ""
+    watts = 0.0
+    for line in out.splitlines():
+        try:
+            value = float(line.strip())  # "[N/A]" on many laptop GPUs
+        except ValueError:
+            continue
+        if 0 < value <= GPU_TDP_MAX_WATTS:
+            watts += value
+    if watts > 0:
         return watts
     # Fall back to LibreHardwareMonitor (covers AMD / Intel GPUs too).
     lhm = _read_lhm_http_powers()
@@ -202,22 +217,24 @@ def _lhm_value_to_watts(value: str) -> Optional[float]:
 def _lhm_walk(node: dict, hardware: str, out: dict) -> None:
     """Recursively collect power sensors from an LHM /data.json tree."""
     text = str(node.get("Text", ""))
-    sensor_type = node.get("Type") or node.get("SensorId", "")
     children = node.get("Children", []) or []
 
-    # Track the closest hardware-component name as we descend.
+    # Track the closest hardware-component name as we descend (GPU names
+    # first: "AMD Radeon" also contains "amd ").
     lowered = text.lower()
-    if any(k in lowered for k in ("cpu", "intel", "amd ", "ryzen", "core ")):
-        hardware = "cpu"
-    elif any(k in lowered for k in ("gpu", "nvidia", "geforce", "radeon", "rtx", "gtx")):
+    if any(k in lowered for k in ("gpu", "nvidia", "geforce", "radeon", "rtx", "gtx",
+                                  " arc", "graphics")):
         hardware = "gpu"
+    elif any(k in lowered for k in ("cpu", "intel", "amd ", "ryzen", "core ")):
+        hardware = "cpu"
 
     value = node.get("Value")
     if value and isinstance(value, str) and value.strip().lower().endswith("w"):
         watts = _lhm_value_to_watts(value)
         if watts is not None and watts > 0:
             name = lowered
-            if hardware == "cpu" and "package" in name and out.get("cpu") is None:
+            if (hardware == "cpu" and "package" in name and "gpu" not in name
+                    and out.get("cpu") is None):
                 out["cpu"] = watts
             elif hardware == "gpu" and ("package" in name or "power" in name) \
                     and out.get("gpu") is None:
@@ -328,10 +345,12 @@ def _read_windows_sensor_cpu_power() -> Optional[float]:
     seconds instead of on every measurement.
     """
     def _query(ns: str) -> Optional[float]:
+        # Identifier looks like "/intelcpu/0/power/0"; skip GPU packages
         ps_cmd = (
             "Get-CimInstance -Namespace " + ns + " -ClassName Sensor "
             "-ErrorAction SilentlyContinue | Where-Object { "
-            "$_.SensorType -eq 'Power' -and $_.Name -match 'Package' } | "
+            "$_.SensorType -eq 'Power' -and $_.Name -match 'Package' "
+            "-and $_.Identifier -match 'cpu/' } | "
             "Sort-Object Value -Descending | "
             "Select-Object -First 1 -ExpandProperty Value"
         )

@@ -38,39 +38,41 @@ try:
         QDialog,
         QDialogButtonBox,
         QGroupBox,
-        QSplitter,
         QListWidget,
         QListWidgetItem,
         QHeaderView,
         QTreeWidget,
         QTreeWidgetItem,
-        QComboBox,
-        QSpinBox,
         QDoubleSpinBox,
-        QStatusBar,
-        QSizePolicy,
     )
     from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
-    from PyQt5.QtGui import QFont, QColor, QPalette, QIcon
-except ImportError:
-    print("GUI requires PyQt5. Install with:")
-    print("  pip install carbon-footprint-tracker[gui]")
-    sys.exit(1)
+    from PyQt5.QtGui import QFont
+except ImportError as exc:
+    raise ImportError(
+        'The GUI requires PyQt5. Install it with: '
+        'pip install "carbon-footprint-tracker[gui]"'
+    ) from exc
 
-from carbon_tracker.tracker import CarbonTracker
-from carbon_tracker.project import CarbonProject
+from carbon_tracker.tracker import CarbonTracker, _app_key
+from carbon_tracker.project import CarbonProject, normalize_project_path
 from carbon_tracker.models import SessionData, BrowserTabFilter
 
 from carbon_tracker.hardware import detect_hardware
 from carbon_tracker.carbon_api import auto_detect_zone
 
-from carbon_tracker.globals import _DARK_STYLE
+from carbon_tracker.globals import _DARK_STYLE, OTHER_APP_NAME
+
+
+class _ZoneSignal(QObject):
+    """Carries a zone detected in a worker thread to the GUI thread."""
+
+    detected = pyqtSignal(str, str, bool)
 
 
 class StatCard(QFrame):
     """A dashboard stat card widget."""
 
-    def __init__(self, title: str, value: str = "—", parent=None):
+    def __init__(self, title: str, value: str = "-", parent=None):
         super().__init__(parent)
         self.setObjectName("statCard")
         self.setFrameShape(QFrame.StyledPanel)
@@ -112,10 +114,13 @@ class CarbonTrackerGUI(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._update_dashboard)
 
-        # Detect zone in background
-        threading.Thread(target=self._detect_zone_bg, daemon=True).start()
+        self._zone_signal = _ZoneSignal()
+        self._zone_signal.detected.connect(self._on_zone_detected)
 
         self._build_ui()
+
+        # Detect zone in background
+        threading.Thread(target=self._detect_zone_bg, daemon=True).start()
 
     # UI LAYOUT
 
@@ -199,7 +204,7 @@ class CarbonTrackerGUI(QMainWindow):
         self._stat_co2 = StatCard("CO₂ Emissions", "0.000 g")
         self._stat_energy = StatCard("Energy Used", "0.000 Wh")
         self._stat_time = StatCard("Duration", "0h 00m 00s")
-        self._stat_intensity = StatCard("Grid Intensity", "— gCO₂/kWh")
+        self._stat_intensity = StatCard("Grid Intensity", "- gCO₂/kWh")
         for card in (
             self._stat_co2,
             self._stat_energy,
@@ -486,22 +491,25 @@ class CarbonTrackerGUI(QMainWindow):
 
     # ACTIONS
 
-    def _detect_zone_bg(self):
-        zone, desc = auto_detect_zone()
-        if zone:
-            self.zone = zone
-            self.zone_desc = desc
-            QTimer.singleShot(0, lambda: self._on_zone_detected(zone, desc))
-        else:
-            QTimer.singleShot(0, lambda: self._zone_label.setText("Zone: not detected (set manually)"))
+    def _detect_zone_bg(self, force: bool = False):
+        zone, desc = auto_detect_zone(refresh=force)
+        self._zone_signal.detected.emit(zone or "", desc or "", force)
 
-    def _on_zone_detected(self, zone: str, desc: str):
+    def _on_zone_detected(self, zone: str, desc: str, force: bool):
+        if not zone:
+            self._zone_label.setText("Zone: not detected (set manually)")
+            return
+        self.zone_desc = desc
         self._zone_label.setText(f"Zone: {zone} ({desc})")
-        if not self._zone_entry.text():
+        # Keep a zone the user typed or the project stores, unless forced
+        if force or not self._zone_entry.text().strip():
             self._zone_entry.setText(zone)
+            self.zone = zone
 
     def _detect_zone_ui(self):
-        threading.Thread(target=self._detect_zone_bg, daemon=True).start()
+        threading.Thread(
+            target=self._detect_zone_bg, kwargs={"force": True}, daemon=True
+        ).start()
 
     def _get_monitored_apps(self) -> list:
         apps = []
@@ -521,7 +529,7 @@ class CarbonTrackerGUI(QMainWindow):
     def _add_app_item(self, name: str, checked: bool = True):
         # Check for duplicates
         for i in range(self._app_list.count()):
-            if self._app_list.item(i).text() == name:
+            if _app_key(self._app_list.item(i).text()) == _app_key(name):
                 return None
 
         item = QListWidgetItem(name)
@@ -627,7 +635,7 @@ class CarbonTrackerGUI(QMainWindow):
             pass
         self.hardware.is_laptop = self._laptop_check.isChecked()
 
-        zone_text = self._zone_entry.text().strip()
+        zone_text = self._zone_entry.text().strip().upper()
         if zone_text:
             self.zone = zone_text
 
@@ -644,9 +652,14 @@ class CarbonTrackerGUI(QMainWindow):
         self._read_settings()
         interval = self._interval_spin.value()
 
+        # All sessions of a project share the project's zone.
+        if self.project and self.project.zone:
+            self.zone = self.project.zone
+            self._zone_entry.setText(self.zone)
+
         self.tracker = CarbonTracker(
             apps=apps,
-            zone=self.zone,
+            zone=self.zone or None,
             api_key=self._apikey_entry.text().strip(),
             hardware=self.hardware,
             update_interval=interval,
@@ -676,23 +689,35 @@ class CarbonTrackerGUI(QMainWindow):
         self._status_label.setStyleSheet("color: #888888; font-size: 14px;")
         self.statusBar().showMessage("Monitoring stopped.")
 
-        # Auto-save to project
+        # With a project, sessions go into the project file only
+        report_path = ""
         if self.project:
             session.description = (
                 f"{self.project.name} session #{len(self.project.sessions) + 1}"
             )
+            if not self.project.zone:
+                self.project.zone = session.zone
             self.project.add_session(session)
-            if self.project_path:
-                self.project.save(self.project_path)
+            saved = self._write_project() if self.project_path else self._save_project()
+            if saved:
+                report_path = self.project_path
             self._refresh_history()
 
-        # Always save a standalone report JSON
-        report_path = self._save_session_report(session)
+        if not report_path:
+            report_path = self._save_session_report(session)
 
         summary = session.summary()
         if report_path:
-            summary += f"\n\nReport saved to:\n{report_path}"
+            summary += f"\n\nSaved to:\n{report_path}"
         QMessageBox.information(self, "Session Complete", summary)
+
+    def _write_project(self) -> bool:
+        try:
+            self.project.save(self.project_path)
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Could not save project:\n{e}")
+            return False
 
     def _save_session_report(self, session: SessionData) -> str:
         """Save session data as a standalone JSON report. Returns the file path or empty string."""
@@ -743,14 +768,21 @@ class CarbonTrackerGUI(QMainWindow):
         else:
             power_status = f"Power: measured ({snap.get('power_source', 'battery')})"
 
-        # Update per-app table
+        # Update per-app table (the rows add up to the totals in the cards)
         self._app_tree.clear()
         apps = snap.get("apps", {})
         monitored = snap.get("monitored_apps", [])
 
         # Show all monitored apps, even if not yet detected
         shown = set()
-        for name, data in apps.items():
+        ordered = sorted(
+            apps.items(),
+            key=lambda kv: (
+                kv[0] == OTHER_APP_NAME,
+                -kv[1].get("total_carbon_grams", 0),
+            ),
+        )
+        for name, data in ordered:
             shown.add(name)
             active_sec = data.get("total_active_seconds", 0)
             ah = int(active_sec) // 3600
@@ -773,9 +805,21 @@ class CarbonTrackerGUI(QMainWindow):
         for name in monitored:
             if name not in shown:
                 item = QTreeWidgetItem(
-                    [name, "—", "—", "—", "—", "0h00m", "waiting"]
+                    [name, "-", "-", "-", "-", "0h00m", "waiting"]
                 )
                 self._app_tree.addTopLevelItem(item)
+
+        if apps:
+            row_wh = sum(d.get("total_energy_kwh", 0) for d in apps.values()) * 1000
+            row_g = sum(d.get("total_carbon_grams", 0) for d in apps.values())
+            total = QTreeWidgetItem(
+                ["Σ total", "", "", f"{row_wh:.4f}", f"{row_g:.4f}", "", ""]
+            )
+            bold = QFont()
+            bold.setBold(True)
+            for col in range(7):
+                total.setFont(col, bold)
+            self._app_tree.addTopLevelItem(total)
 
         self.statusBar().showMessage(
             f"CO₂: {carbon:.3f}g | Energy: {energy:.3f}Wh | "
@@ -807,7 +851,8 @@ class CarbonTrackerGUI(QMainWindow):
             return
         try:
             self.project = CarbonProject.load(path)
-            self.project_path = path
+            # A report opened as a project is saved under a new name
+            self.project_path = None if self.project.loaded_from_report else path
             self._project_info_label.setText(
                 f"Project: {self.project.name} | {len(self.project.sessions)} sessions | "
                 f"{self.project.total_carbon_grams():.2f}g CO₂ total"
@@ -822,12 +867,13 @@ class CarbonTrackerGUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load project:\n{e}")
 
-    def _save_project(self):
+    def _save_project(self) -> bool:
         if not self.project:
             QMessageBox.warning(self, "No Project", "Create or open a project first.")
-            return
+            return False
         self.project.selected_apps = self._get_monitored_apps()
-        self.project.zone = self.zone
+        zone_text = self._zone_entry.text().strip().upper()
+        self.project.zone = zone_text or self.project.zone or self.zone
         if not self.project_path:
             path, _ = QFileDialog.getSaveFileName(
                 self,
@@ -836,12 +882,14 @@ class CarbonTrackerGUI(QMainWindow):
                 "Carbon Project (*.carbon.json)",
             )
             if not path:
-                return
-            self.project_path = path
-        self.project.save(self.project_path)
+                return False
+            self.project_path = normalize_project_path(path)
+        if not self._write_project():
+            return False
         self._project_info_label.setText(
             f"Project: {self.project.name} | Saved to {os.path.basename(self.project_path)}"
         )
+        return True
 
     # ---- File selection ----
 
@@ -1047,10 +1095,9 @@ class CarbonTrackerGUI(QMainWindow):
                 per_app.items(), key=lambda x: -x[1]["projected_carbon_grams"]
             )[:5]
             for name, app in top:
-                pm = app["rate_std_grams_per_hour"] * result["projected_hours"]
                 msg += (
                     f"    {name:22s} CO₂={app['projected_carbon_grams']:.2f}g "
-                    f"(±{pm:.2f}g)  "
+                    f"({app['carbon_low_grams']:.2f}-{app['carbon_high_grams']:.2f}g)  "
                     f"Energy={app['projected_energy_kwh'] * 1000:.2f}Wh\n"
                 )
 
@@ -1068,9 +1115,8 @@ class CarbonTrackerGUI(QMainWindow):
         # Energy saving recommendations
         msg += "\n<== ENERGY SAVING RECOMMENDATIONS ==>\n"
 
-        intensity = 0.0
-        if self.project.sessions:
-            intensity = self.project.sessions[-1].avg_intensity
+        energy = self.project.total_energy_kwh()
+        intensity = self.project.sessions_carbon_grams() / energy if energy > 0 else 0.0
 
         if intensity > 500:
             msg += (
@@ -1123,13 +1169,24 @@ class CarbonTrackerGUI(QMainWindow):
                 self.project = CarbonProject(name="Imported")
 
             if "sessions" in data:
-                for s in data["sessions"]:
-                    self.project.add_session(SessionData.from_dict(s))
+                sessions = [SessionData.from_dict(s) for s in data["sessions"]]
             elif "session_id" in data:
-                self.project.add_session(SessionData.from_dict(data))
+                sessions = [SessionData.from_dict(data)]
+            else:
+                raise ValueError("No sessions in this file.")
+            # add_session skips sessions already in the project.
+            added = sum(1 for s in sessions if self.project.add_session(s))
+            if added and self.project_path:
+                self._write_project()
 
             self._refresh_history()
-            QMessageBox.information(self, "Import", "Session(s) imported successfully.")
+            skipped = len(sessions) - added
+            QMessageBox.information(
+                self,
+                "Import",
+                f"Imported {added} session(s)."
+                + (f" Skipped {skipped} already in the project." if skipped else ""),
+            )
         except Exception as e:
             QMessageBox.critical(self, "Import Error", str(e))
 

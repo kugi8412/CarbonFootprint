@@ -11,7 +11,18 @@ import platform
 import subprocess
 
 from carbon_tracker.models import HardwareInfo
-from carbon_tracker.globals import _CPU_TDP_TABLE, _GPU_TDP_TABLE
+from carbon_tracker.globals import (
+    _CPU_TDP_TABLE,
+    _GPU_TDP_TABLE,
+    CPU_TDP_MAX_WATTS,
+    GPU_TDP_MAX_WATTS,
+    GPU_TDP_MAX_WATTS_LAPTOP,
+)
+
+
+def _plausible_tdp(watts: float, max_watts: float) -> bool:
+    """False for placeholder limits some drivers report (e.g. 5001 W)."""
+    return 1.0 <= watts <= max_watts
 
 
 def _match_tdp(name: str, table: list) -> float:
@@ -109,17 +120,18 @@ def detect_cpu_tdp_from_device() -> float:
                 if os.path.exists(fpath):
                     with open(fpath) as f:
                         micro_watts = int(f.read().strip())
-                    if micro_watts > 0:
+                    if _plausible_tdp(micro_watts / 1_000_000.0, CPU_TDP_MAX_WATTS):
                         return micro_watts / 1_000_000.0
     except (OSError, ValueError):
         pass
     return 0.0
 
 
-def detect_gpu_tdp_from_device() -> float:
+def detect_gpu_tdp_from_device(max_watts: float = GPU_TDP_MAX_WATTS) -> float:
     """Query the real GPU board power limit from the driver. nvidia-smi works on
     Windows, Linux and WSL2; rocm-smi covers AMD on Linux. Returns watts, or
-    0.0 when no supported GPU/driver is present."""
+    0.0 when no supported GPU/driver is present or the reported limit is not
+    plausible (above ``max_watts``)."""
     # NVIDIA: the default power limit equals the board TDP.
     for query in ("power.default_limit", "power.max_limit"):
         try:
@@ -131,12 +143,14 @@ def detect_gpu_tdp_from_device() -> float:
                 ],
                 text=True,
                 stderr=subprocess.DEVNULL,
+                timeout=10,
             ).strip()
             if out:
                 watts = float(out.splitlines()[0].strip())
-                if watts > 0:
+                if _plausible_tdp(watts, max_watts):
                     return watts
-        except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+        except (FileNotFoundError, subprocess.CalledProcessError,
+                subprocess.TimeoutExpired, OSError, ValueError):
             pass
 
     # AMD ROCm (Linux).
@@ -149,11 +163,23 @@ def detect_gpu_tdp_from_device() -> float:
         match = re.search(r"([\d.]+)\s*W", out)
         if match:
             watts = float(match.group(1))
-            if watts > 0:
+            if _plausible_tdp(watts, max_watts):
                 return watts
     except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
         pass
     return 0.0
+
+
+def _gpu_rank(name: str) -> int:
+    """2 = discrete, 1 = integrated, 0 = virtual/basic display adapter."""
+    low = name.lower()
+    if any(k in low for k in ("microsoft basic", "virtio", "vmware", "virtualbox",
+                              "parsec", "remote display", "hyper-v", "virtual")):
+        return 0
+    if any(k in low for k in ("intel", "uhd", "iris", "radeon(tm) graphics",
+                              "radeon graphics", "780m", "680m", "890m", "760m")):
+        return 1
+    return 2
 
 
 def detect_gpu_name() -> str:
@@ -162,7 +188,21 @@ def detect_gpu_name() -> str:
         if system == "Windows":
             import winreg
 
-            for i in range(10):
+            # nvidia-smi also finds a discrete GPU that Optimus has powered down
+            try:
+                out = subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                    text=True, stderr=subprocess.DEVNULL, timeout=10,
+                ).strip()
+                if out:
+                    return out.splitlines()[0].strip()
+            except (FileNotFoundError, subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired, OSError):
+                pass
+
+            # Otherwise the best of all display adapters
+            names = []
+            for i in range(32):
                 try:
                     subkey = (
                         r"SYSTEM\CurrentControlSet\Control\Class"
@@ -172,17 +212,11 @@ def detect_gpu_name() -> str:
                     key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey)
                     desc, _ = winreg.QueryValueEx(key, "DriverDesc")
                     winreg.CloseKey(key)
-                    if (
-                        desc
-                        and "intel" not in desc.lower()
-                        and "uhd" not in desc.lower()
-                    ):
-                        return desc
-                    if desc and not detect_gpu_name.__dict__.get("_fallback"):
-                        detect_gpu_name._fallback = desc
+                    if desc:
+                        names.append(desc.strip())
                 except OSError:
                     continue
-            return getattr(detect_gpu_name, "_fallback", "")
+            return max(names, key=_gpu_rank) if names else ""
         elif system == "Linux":
             # Try nvidia-smi first for NVIDIA GPUs
             try:
@@ -202,11 +236,14 @@ def detect_gpu_name() -> str:
                 text=True,
                 stderr=subprocess.DEVNULL,
             )
+            names = []
             for line in out.splitlines():
                 if any(x in line.lower() for x in ["vga", "3d", "display"]):
                     parts = line.split(":")
                     if len(parts) >= 3:
-                        return parts[-1].strip()
+                        names.append(parts[-1].strip())
+            if names:
+                return max(names, key=_gpu_rank)
         elif system == "Darwin":
             out = subprocess.check_output(
                 ["system_profiler", "SPDisplaysDataType"],
@@ -257,7 +294,10 @@ def detect_is_laptop() -> bool:
                         return False
                 except (OSError, ValueError):
                     pass
-                return False  # default to desktop on WSL if no info
+                # WSL2 has no DMI data: ask the Windows host for a battery
+                from carbon_tracker.power import read_battery_status
+
+                return bool(read_battery_status().get("present"))
 
             # Native Linux: check multiple battery paths
             power_supply_dir = "/sys/class/power_supply"
@@ -318,7 +358,9 @@ def detect_hardware() -> HardwareInfo:
             info.cpu_tdp_watts = 105.0
 
     # GPU TDP: prefer the real board power limit from the driver, then the table.
-    gpu_tdp = detect_gpu_tdp_from_device()
+    gpu_tdp = detect_gpu_tdp_from_device(
+        GPU_TDP_MAX_WATTS_LAPTOP if info.is_laptop else GPU_TDP_MAX_WATTS
+    )
     if gpu_tdp <= 0:
         gpu_tdp = _match_tdp(info.gpu_name, _GPU_TDP_TABLE)
 

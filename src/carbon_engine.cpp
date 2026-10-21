@@ -1,60 +1,77 @@
 #include "carbon_engine.h"
 #include "report.h"
 #include "globals.h"
+#include <cctype>
 
 // ============================================================
 // Carbon Footprint Engine Implementation
 // ============================================================
 
+std::string AppKey(const std::string& name) {
+    std::string key = name;
+    // unsigned char: std::tolower on negative chars is undefined
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (key.size() > 4 && key.compare(key.size() - 4, 4, ".exe") == 0)
+        key.resize(key.size() - 4);
+    return key;
+}
+
+static std::string LowerCopy(const std::string& s) {
+    std::string out = s;
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
 CarbonEngine::CarbonEngine(const EngineConfig& config)
     : config_(config),
-      powerMonitor_(config.cpuTdpWatts, config.gpuTdpWatts, config.baseSystemWatts),
+      powerMonitor_(config.cpuTdpWatts, config.gpuTdpWatts, config.baseSystemWatts,
+                    config.isLaptop),
       carbonApi_(config.zone, config.apiKey),
       running_(false),
       sessionStartTime_(0),
       totalSessionCarbonGrams_(0),
       totalSessionEnergyKwh_(0),
       totalSessionSeconds_(0) {
+    // One entry per process name ("Slack.exe" == "slack")
+    std::vector<std::string> unique;
+    for (const auto& app : config_.targetApps) {
+        bool dup = false;
+        for (const auto& u : unique) dup = dup || AppKey(u) == AppKey(app);
+        if (!dup && !app.empty()) unique.push_back(app);
+    }
+    config_.targetApps = unique;
 }
 
 CarbonEngine::~CarbonEngine() {
-    if (running_) {
-        Stop();
-    }
+    // Joins the threads even after RequestStop()
+    Stop();
 }
 
 bool CarbonEngine::IsTargetApp(const std::string& appName) {
     for (const auto& target : config_.targetApps) {
-        // Case-insensitive comparison
-        std::string lower1 = appName;
-        std::string lower2 = target;
-        std::transform(lower1.begin(), lower1.end(), lower1.begin(), ::tolower);
-        std::transform(lower2.begin(), lower2.end(), lower2.begin(), ::tolower);
-
-        if (lower1 == lower2) return true;
-
-        // Also check without .exe extension
-        std::string noExt1 = lower1, noExt2 = lower2;
-        auto stripExe = [](std::string& s) {
-            if (s.size() > 4 && s.substr(s.size() - 4) == ".exe")
-                s = s.substr(0, s.size() - 4);
-        };
-        stripExe(noExt1);
-        stripExe(noExt2);
-        if (noExt1 == noExt2) return true;
+        if (AppKey(appName) == AppKey(target)) return true;
     }
     return false;
 }
 
 void CarbonEngine::MonitorLoop() {
     int tickCount = 0;
+    auto lastTick = std::chrono::steady_clock::now();
+    // Brightness is a PowerShell call on Windows; read it every 30 s
+    double brightness = 0.5;
+    auto lastBrightnessRead = lastTick - std::chrono::hours(1);
 
     while (running_) {
         std::string activeApp = ProcessMonitor::GetActiveProcessName();
         std::string windowTitle = ProcessMonitor::GetActiveWindowTitle();
-        double systemCpuUsage = ProcessMonitor::GetSystemCpuUsage();
-        double brightness = ScreenMonitor::GetBrightness();
-        if (brightness < 0) brightness = 0.5; // Default
+        double systemCpuUsage = std::max(ProcessMonitor::GetSystemCpuUsage(), 0.0);
+        if (std::chrono::steady_clock::now() - lastBrightnessRead >= std::chrono::seconds(30)) {
+            brightness = ScreenMonitor::GetBrightness();
+            if (brightness < 0) brightness = 0.5; // Default
+            lastBrightnessRead = std::chrono::steady_clock::now();
+        }
 
         // Get per-process CPU usage for all target apps
         std::vector<std::string> appsToTrack;
@@ -66,82 +83,94 @@ void CarbonEngine::MonitorLoop() {
 
         // Calculate total tracked CPU usage for proportional energy allocation
         double totalTrackedCpu = 0.0;
-        for (const auto& [name, cpu] : perAppCpu) {
+        for (auto& [name, cpu] : perAppCpu) {
+            cpu = std::max(cpu, 0.0);
             totalTrackedCpu += cpu;
         }
 
         PowerReading power = powerMonitor_.GetCurrentPower(systemCpuUsage, brightness);
         CarbonIntensityData intensity = carbonApi_.GetIntensity();
 
-        double timeHours = config_.updateIntervalSeconds / 3600.0;
+        // Integrate over the real elapsed time; a long gap (sleep) counts as
+        // one interval
+        auto now = std::chrono::steady_clock::now();
+        double dtSeconds = std::chrono::duration<double>(now - lastTick).count();
+        lastTick = now;
+        if (dtSeconds <= 0.0 ||
+            dtSeconds > std::max(60.0, 5.0 * config_.updateIntervalSeconds)) {
+            dtSeconds = config_.updateIntervalSeconds;
+        }
+
+        double timeHours = dtSeconds / 3600.0;
         double totalEnergyKwh = (power.totalWatts / 1000.0) * timeHours;
         double totalCarbonGrams = totalEnergyKwh * intensity.intensity;
 
         int currentHour = TimeUtil::CurrentHour();
 
+        // Energy shares: CPU-proportional while tracked apps are busy, else 10 %
+        // for the foreground app and 2 % in the background. The rest goes to
+        // the "other" row.
+        bool busy = totalTrackedCpu > 0.1 && systemCpuUsage > 0.1;
+        std::vector<std::pair<std::string, double>> shares;
+        double shareSum = 0.0;
+        for (const auto& target : appsToTrack) {
+            auto cpuIt = perAppCpu.find(target);
+            double appCpuPercent = (cpuIt != perAppCpu.end()) ? cpuIt->second : 0.0;
+
+            // Skip if app is not running
+            if (appCpuPercent <= 0.0 && !ProcessMonitor::IsProcessRunning(target))
+                continue;
+
+            // A foreground browser on a non-matching tab gets nothing
+            bool isForeground = AppKey(activeApp) == AppKey(target);
+            if (isForeground && !MatchesBrowserTabFilter(target, windowTitle))
+                continue;
+
+            double share;
+            if (busy) {
+                share = appCpuPercent / std::max(systemCpuUsage, totalTrackedCpu);
+            } else if (isForeground) {
+                share = 0.10;
+            } else {
+                share = 0.02;
+            }
+            shares.push_back({target, share});
+            shareSum += share;
+        }
+        double scale = shareSum > 1.0 ? 1.0 / shareSum : 1.0;
+
         {
             std::lock_guard<std::mutex> lock(dataMutex_);
-            totalSessionSeconds_ += config_.updateIntervalSeconds;
+            totalSessionSeconds_ += dtSeconds;
             totalSessionEnergyKwh_ += totalEnergyKwh;
             totalSessionCarbonGrams_ += totalCarbonGrams;
 
             // Track brightness
             brightnessHistory_.push_back({TimeUtil::SecondsSinceEpoch(), brightness});
 
-            // Allocate energy to each running target app based on their CPU usage
-            for (const auto& target : config_.targetApps) {
-                auto cpuIt = perAppCpu.find(target);
-                double appCpuPercent = (cpuIt != perAppCpu.end()) ? cpuIt->second : 0.0;
-
-                // Skip if app is not running
-                if (appCpuPercent <= 0.0 && !ProcessMonitor::IsProcessRunning(target))
-                    continue;
-
-                // Check browser tab filter - only count if the right tab is active
-                if (!MatchesBrowserTabFilter(target, windowTitle)) {
-                    // Browser is running but wrong tab is active - attribute minimal energy
-                    // (background tab uses ~5% of what foreground does)
-                    if (IsTargetApp(activeApp)) {
-                        // It's the foreground app but wrong tab - skip
-                        continue;
-                    }
-                }
-
-                // Calculate this app's share of energy
-                // Use per-process CPU for proportional allocation
-                double appEnergyKwh;
-                double appCarbonGrams;
-
-                if (totalTrackedCpu > 0.1) {
-                    // Proportional allocation: app_energy = total_energy * (app_cpu / system_cpu)
-                    double cpuShare = appCpuPercent / std::max(systemCpuUsage, 1.0);
-                    cpuShare = std::min(cpuShare, 1.0);
-                    appEnergyKwh = totalEnergyKwh * cpuShare;
-                    appCarbonGrams = appEnergyKwh * intensity.intensity;
-                } else if (IsTargetApp(activeApp)) {
-                    // App is active (foreground) but low CPU - give it idle power share
-                    double idleFraction = 0.1; // 10% of system power as minimum
-                    appEnergyKwh = totalEnergyKwh * idleFraction;
-                    appCarbonGrams = appEnergyKwh * intensity.intensity;
-                } else {
-                    // Running in background with near-zero CPU
-                    double bgFraction = 0.02; // 2% background
-                    appEnergyKwh = totalEnergyKwh * bgFraction;
-                    appCarbonGrams = appEnergyKwh * intensity.intensity;
-                }
-
-                auto& app = appData_[target];
-                app.appName = target;
-                app.totalActiveSeconds += config_.updateIntervalSeconds;
-                app.totalEnergyKwh += appEnergyKwh;
-                app.totalCarbonGrams += appCarbonGrams;
-                app.carbonByHour[currentHour] += appCarbonGrams;
-                app.energyByHour[currentHour] += appEnergyKwh;
+            auto accumulate = [&](const std::string& name, double energyKwh, double cpu) {
+                double carbonGrams = energyKwh * intensity.intensity;
+                auto& app = appData_[name];
+                app.appName = name;
+                app.totalActiveSeconds += dtSeconds;
+                app.totalEnergyKwh += energyKwh;
+                app.totalCarbonGrams += carbonGrams;
+                app.carbonByHour[currentHour] += carbonGrams;
+                app.energyByHour[currentHour] += energyKwh;
+                app.secondsByHour[currentHour] += dtSeconds;
                 app.sampleCount++;
-                // Update CPU stats
-                app.avgCpuPercent = ((app.avgCpuPercent * (app.sampleCount - 1)) + appCpuPercent) / app.sampleCount;
-                app.peakCpuPercent = std::max(app.peakCpuPercent, appCpuPercent);
+                app.avgCpuPercent = ((app.avgCpuPercent * (app.sampleCount - 1)) + cpu) / app.sampleCount;
+                app.peakCpuPercent = std::max(app.peakCpuPercent, cpu);
+            };
+
+            for (const auto& [target, share] : shares) {
+                auto cpuIt = perAppCpu.find(target);
+                accumulate(target, totalEnergyKwh * share * scale,
+                           cpuIt != perAppCpu.end() ? cpuIt->second : 0.0);
             }
+            accumulate(OTHER_APP_NAME,
+                       totalEnergyKwh * std::max(1.0 - shareSum * scale, 0.0),
+                       std::max(systemCpuUsage - totalTrackedCpu, 0.0));
         }
 
         // Print live status every 10 ticks
@@ -162,7 +191,10 @@ void CarbonEngine::MonitorLoop() {
                       << "     " << std::flush;
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(config_.updateIntervalSeconds));
+        // Stop() wakes this wait
+        std::unique_lock<std::mutex> lock(stopMutex_);
+        stopCv_.wait_for(lock, std::chrono::seconds(config_.updateIntervalSeconds),
+                         [this] { return !running_; });
     }
 }
 
@@ -207,12 +239,24 @@ void CarbonEngine::Start() {
 }
 
 void CarbonEngine::Stop() {
-    if (!running_) return;
     running_ = false;
+    {
+        std::lock_guard<std::mutex> lock(stopMutex_);
+    }
+    stopCv_.notify_all();
+    if (!monitorThread_.joinable() && !apiThread_.joinable()) return;
     std::cout << "\n\nStopping Carbon Footprint Tracker...\n";
 
     if (monitorThread_.joinable()) monitorThread_.join();
     if (apiThread_.joinable()) apiThread_.join();
+}
+
+void CarbonEngine::RequestStop() {
+    running_ = false;  // async-signal-safe
+}
+
+double CarbonEngine::GetSessionStartEpoch() const {
+    return sessionStartTime_;
 }
 
 bool CarbonEngine::IsRunning() const {
@@ -269,46 +313,30 @@ const EngineConfig& CarbonEngine::GetConfig() const {
 
 void CarbonEngine::AddApp(const std::string& appName) {
     std::lock_guard<std::mutex> lock(dataMutex_);
-    // Check for duplicates (case-insensitive)
-    std::string lowerNew = appName;
-    std::transform(lowerNew.begin(), lowerNew.end(), lowerNew.begin(), ::tolower);
-
+    const std::string key = AppKey(appName);
+    if (key.empty()) return;
+    // A re-added app is active again
+    for (auto& [name, data] : appData_) {
+        if (AppKey(name) == key) data.isActive = true;
+    }
     for (const auto& existing : config_.targetApps) {
-        std::string lowerEx = existing;
-        std::transform(lowerEx.begin(), lowerEx.end(), lowerEx.begin(), ::tolower);
-        if (lowerEx == lowerNew) return; // already exists
+        if (AppKey(existing) == key) return; // already exists
     }
     config_.targetApps.push_back(appName);
 }
 
 void CarbonEngine::RemoveApp(const std::string& appName) {
     std::lock_guard<std::mutex> lock(dataMutex_);
-    std::string lowerRm = appName;
-    std::transform(lowerRm.begin(), lowerRm.end(), lowerRm.begin(), ::tolower);
+    const std::string key = AppKey(appName);
 
     config_.targetApps.erase(
         std::remove_if(config_.targetApps.begin(), config_.targetApps.end(),
-            [&](const std::string& s) {
-                std::string lower = s;
-                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-                return lower == lowerRm;
-            }),
+            [&](const std::string& s) { return AppKey(s) == key; }),
         config_.targetApps.end());
 
     // Mark existing data as inactive but KEEP it for the report
     for (auto& [name, data] : appData_) {
-        std::string lowerName = name;
-        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
-        std::string lowerRmNoExt = lowerRm;
-        if (lowerRmNoExt.size() > 4 && lowerRmNoExt.substr(lowerRmNoExt.size()-4) == ".exe")
-            lowerRmNoExt = lowerRmNoExt.substr(0, lowerRmNoExt.size()-4);
-        std::string lowerNameNoExt = lowerName;
-        if (lowerNameNoExt.size() > 4 && lowerNameNoExt.substr(lowerNameNoExt.size()-4) == ".exe")
-            lowerNameNoExt = lowerNameNoExt.substr(0, lowerNameNoExt.size()-4);
-
-        if (lowerName == lowerRm || lowerNameNoExt == lowerRmNoExt) {
-            data.isActive = false;
-        }
+        if (AppKey(name) == key) data.isActive = false;
     }
 }
 
@@ -321,29 +349,14 @@ std::vector<std::string> CarbonEngine::GetActiveApps() {
 
 bool CarbonEngine::MatchesBrowserTabFilter(const std::string& appName, const std::string& windowTitle) {
     // Check if this app has a tab filter configured
-    std::string lowerApp = appName;
-    std::transform(lowerApp.begin(), lowerApp.end(), lowerApp.begin(), ::tolower);
-    // Strip .exe
-    std::string lowerAppNoExt = lowerApp;
-    if (lowerAppNoExt.size() > 4 && lowerAppNoExt.substr(lowerAppNoExt.size()-4) == ".exe")
-        lowerAppNoExt = lowerAppNoExt.substr(0, lowerAppNoExt.size()-4);
+    const std::string key = AppKey(appName);
 
     for (const auto& filter : config_.tabFilters) {
         if (!filter.enabled) continue;
-        std::string lowerBrowser = filter.browserProcess;
-        std::transform(lowerBrowser.begin(), lowerBrowser.end(), lowerBrowser.begin(), ::tolower);
-        std::string lowerBrowserNoExt = lowerBrowser;
-        if (lowerBrowserNoExt.size() > 4 && lowerBrowserNoExt.substr(lowerBrowserNoExt.size()-4) == ".exe")
-            lowerBrowserNoExt = lowerBrowserNoExt.substr(0, lowerBrowserNoExt.size()-4);
-
-        if (lowerApp == lowerBrowser || lowerAppNoExt == lowerBrowserNoExt) {
+        if (AppKey(filter.browserProcess) == key) {
             // This app has a tab filter - check if current window title matches
             if (windowTitle.empty()) return false;
-            std::string lowerTitle = windowTitle;
-            std::transform(lowerTitle.begin(), lowerTitle.end(), lowerTitle.begin(), ::tolower);
-            std::string lowerFilter = filter.titleFilter;
-            std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
-            return lowerTitle.find(lowerFilter) != std::string::npos;
+            return LowerCopy(windowTitle).find(LowerCopy(filter.titleFilter)) != std::string::npos;
         }
     }
     // No filter for this app - always track
@@ -354,10 +367,7 @@ void CarbonEngine::AddTabFilter(const BrowserTabFilter& filter) {
     std::lock_guard<std::mutex> lock(dataMutex_);
     // Replace existing filter for same browser
     for (auto& f : config_.tabFilters) {
-        std::string l1 = f.browserProcess, l2 = filter.browserProcess;
-        std::transform(l1.begin(), l1.end(), l1.begin(), ::tolower);
-        std::transform(l2.begin(), l2.end(), l2.begin(), ::tolower);
-        if (l1 == l2) {
+        if (AppKey(f.browserProcess) == AppKey(filter.browserProcess)) {
             f = filter;
             return;
         }
@@ -367,15 +377,10 @@ void CarbonEngine::AddTabFilter(const BrowserTabFilter& filter) {
 
 void CarbonEngine::RemoveTabFilter(const std::string& browserProcess) {
     std::lock_guard<std::mutex> lock(dataMutex_);
-    std::string lower = browserProcess;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    const std::string key = AppKey(browserProcess);
     config_.tabFilters.erase(
         std::remove_if(config_.tabFilters.begin(), config_.tabFilters.end(),
-            [&](const BrowserTabFilter& f) {
-                std::string l = f.browserProcess;
-                std::transform(l.begin(), l.end(), l.begin(), ::tolower);
-                return l == lower;
-            }),
+            [&](const BrowserTabFilter& f) { return AppKey(f.browserProcess) == key; }),
         config_.tabFilters.end());
 }
 
@@ -400,6 +405,7 @@ CarbonEngine::Projection CarbonEngine::ProjectFuture(double futureHours) {
     std::lock_guard<std::mutex> lock(dataMutex_);
     Projection proj{};
     proj.projectedHours = futureHours;
+    if (!(futureHours > 0.0)) return proj;
 
     // Current session rate
     double sessionHours = totalSessionSeconds_ / 3600.0;
@@ -413,6 +419,8 @@ CarbonEngine::Projection CarbonEngine::ProjectFuture(double futureHours) {
     double totalHistHours = 0;
     double totalHistEnergy = 0;
     for (const auto& s : previousSessions_) {
+        // Skip invalid imported values
+        if (s.durationSeconds <= 0 || s.carbonGrams < 0 || s.energyKwh < 0) continue;
         totalHistCarbon += s.carbonGrams;
         totalHistHours += s.durationSeconds / 3600.0;
         totalHistEnergy += s.energyKwh;

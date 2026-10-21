@@ -7,7 +7,7 @@ macOS, and WSL.
 
 ## 1. Requirements
 
-- **Python 3.8+** (the package). Check with `python --version` (or `py -3 --version` on Windows).
+- **Python 3.9+** (the package). Check with `python --version` (or `py -3 --version` on Windows).
 - Optional: **PyQt5** for the desktop GUI.
 - Optional (for *measured* CPU/GPU power instead of estimates): see [section 5](#5-get-real-measured-power-optional).
 
@@ -85,7 +85,7 @@ carbon-tracker detect
 ```
 
 - Best case: real CPU power is read from **Intel/AMD RAPL** automatically
-  (`/sys/class/powercap`) — **no extra tools, works on AC**.
+  (`/sys/class/powercap`): **no extra tools, works on AC**.
 - If RAPL is permission-restricted: `sudo chmod -R a+r /sys/class/powercap/intel-rapl*`.
 - GUI needs X11/Wayland; for headless use the CLI.
 
@@ -125,7 +125,7 @@ By default, power is **measured** when a source is available and otherwise
 
 | Platform | What you get out of the box | How to measure the **CPU** on AC |
 |----------|-----------------------------|----------------------------------|
-| **Linux (native)** | CPU via RAPL + GPU via nvidia-smi | already measured — nothing to do |
+| **Linux (native)** | CPU via RAPL + GPU via nvidia-smi | already measured, nothing to do |
 | **Windows** | GPU via nvidia-smi | run **LibreHardwareMonitor** (see below) |
 | **macOS** | whole-system on battery only | run on battery, or use a sensor tool |
 | **WSL** | battery state from host | use LibreHardwareMonitor on Windows |
@@ -171,7 +171,7 @@ the same way (RAPL on Linux, `nvidia-smi`/`rocm-smi` for GPUs).
 | Symptom | Fix |
 |---------|-----|
 | `python` runs Python 2 | use `py -3` (Windows) or `python3` (Linux/macOS) |
-| `detect` shows **estimated** power on a laptop | you're on AC — unplug, or set up a sensor (section 5) |
+| `detect` shows **estimated** power on a laptop | you're on AC: unplug, or set up a sensor (section 5) |
 | CPU power is `None` on Windows | LibreHardwareMonitor not running / not elevated |
-| GPU power is `None` | non-NVIDIA GPU without nvidia-smi — use LibreHardwareMonitor |
+| GPU power is `None` | non-NVIDIA GPU without nvidia-smi: use LibreHardwareMonitor |
 | GUI won't start | install the GUI extra: `pip install "carbon-footprint-tracker[gui]"` |

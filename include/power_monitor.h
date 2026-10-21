@@ -28,6 +28,7 @@ private:
     double cpuTdpWatts_;       // Configurable CPU TDP
     double gpuTdpWatts_;       // Configurable GPU TDP
     double baseSystemWatts_;   // Base system power (idle)
+    bool isLaptop_;            // laptop panel vs external monitor power
     bool nvmlInitialized_;
 
 #ifdef HAS_NVML
@@ -60,9 +61,16 @@ private:
     double lastSensorProbeTime_;   // last time the WMI sensor was searched
     bool   sensorAvailable_;       // an LHM/OHM WMI provider was found
     std::string sensorNamespace_;  // cached WMI namespace
+    // Cached readings of sensors that need a subprocess
+    double lastGpuTime_;
+    double lastGpuWatts_;
+    std::string lastGpuSource_;
+    double lastSensorTime_;
+    double lastSensorWatts_;
 
 public:
-    PowerMonitor(double cpuTdp = 65.0, double gpuTdp = 150.0, double basePower = 30.0);
+    PowerMonitor(double cpuTdp = 65.0, double gpuTdp = 150.0, double basePower = 30.0,
+                 bool isLaptop = true);
     ~PowerMonitor();
 
     // Get current power reading with breakdown and measured/estimated flags.

@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.14)
-project(CarbonFootprint VERSION 1.1.5 LANGUAGES CXX)
+
+# Version from carbon_tracker/_version.py
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/carbon_tracker/_version.py" _CFT_VERSION_PY)
+string(REGEX MATCH "__version__ = \"([0-9]+\\.[0-9]+\\.[0-9]+)\"" _ "${_CFT_VERSION_PY}")
+project(CarbonFootprint VERSION ${CMAKE_MATCH_1} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,7 +34,6 @@ if(WIN32)
 elseif(APPLE)
     find_library(IOKIT_LIB IOKit)
     find_library(COREFOUND_LIB CoreFoundation)
-    find_library(APPKIT_LIB AppKit)
     target_link_libraries(carbon_tracker PRIVATE ${IOKIT_LIB} ${COREFOUND_LIB} pthread)
     target_compile_definitions(carbon_tracker PRIVATE PLATFORM_MAC)
 else()
@@ -48,30 +51,24 @@ endif()
 # Optional: NVIDIA NVML
 option(USE_NVML "Enable NVIDIA GPU monitoring via NVML" OFF)
 if(USE_NVML)
-    find_library(NVML_LIB nvidia-ml HINTS
+    # nvml.h comes with the CUDA toolkit; the library is nvml.lib on Windows
+    # and libnvidia-ml.so elsewhere
+    find_package(CUDAToolkit QUIET)
+    find_path(NVML_INCLUDE_DIR nvml.h HINTS ${CUDAToolkit_INCLUDE_DIRS} "/usr/local/cuda/include")
+    find_library(NVML_LIB NAMES nvml nvidia-ml HINTS
+        ${CUDAToolkit_LIBRARY_DIR}
         "C:/Program Files/NVIDIA Corporation/NVSMI"
         "/usr/lib/x86_64-linux-gnu"
         "/usr/lib64"
+        "/usr/local/cuda/lib64/stubs"
     )
-    if(NVML_LIB)
+    if(NVML_LIB AND NVML_INCLUDE_DIR)
+        target_include_directories(carbon_tracker PRIVATE ${NVML_INCLUDE_DIR})
         target_link_libraries(carbon_tracker PRIVATE ${NVML_LIB})
         target_compile_definitions(carbon_tracker PRIVATE HAS_NVML)
         message(STATUS "NVML found: ${NVML_LIB}")
     else()
-        message(WARNING "NVML not found, GPU monitoring will use estimates")
-    endif()
-endif()
-
-# Optional: libcurl
-option(USE_CURL "Use libcurl for HTTP requests" OFF)
-if(USE_CURL)
-    find_package(CURL QUIET)
-    if(CURL_FOUND)
-        target_link_libraries(carbon_tracker PRIVATE CURL::libcurl)
-        target_compile_definitions(carbon_tracker PRIVATE HAS_CURL)
-        message(STATUS "libcurl found")
-    else()
-        message(WARNING "libcurl not found, using platform HTTP or system curl")
+        message(WARNING "NVML (nvml.h + library) not found, GPU power will use nvidia-smi / estimates")
     endif()
 endif()
 

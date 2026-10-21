@@ -5,72 +5,150 @@
 Carbon intensity API: auto-detect zone + fetch real-time grid data.
 """
 
+import os
 import requests
-import time
 import locale
+import platform
+import warnings
 
 from typing import Tuple
 
-from carbon_tracker.globals import _COUNTRY_TO_ZONE, _FALLBACK_INTENSITY
+from carbon_tracker.globals import (
+    _COUNTRY_TO_ZONE,
+    _FALLBACK_INTENSITY,
+    _TIMEZONE_TO_COUNTRY,
+    _ZONE_ALIASES,
+    FALLBACK_GLOBAL_INTENSITY,
+)
+
+# (url, country field)
+_GEO_ENDPOINTS = [
+    ("https://ipapi.co/json/", "country_code"),
+    ("https://ipinfo.io/json", "country"),
+    ("https://ipwho.is/", "country_code"),
+]
+
+# Detected zone, reused for the rest of the process
+_zone_cache: dict = {}
+
+
+def normalize_zone(zone: str) -> str:
+    """Upper-case zone ID; old codes are mapped to Electricity Maps IDs."""
+    zone = (zone or "").strip().upper()
+    return _ZONE_ALIASES.get(zone, zone)
+
+
+def _table_key(zone: str) -> str:
+    zone = normalize_zone(zone)
+    return zone if zone in _FALLBACK_INTENSITY else zone.split("-")[0]
+
+
+def has_fallback_intensity(zone: str) -> bool:
+    """True when the offline table has a value for this zone (or its country)."""
+    return _table_key(zone) in _FALLBACK_INTENSITY
 
 
 def get_fallback_intensity(zone: str) -> float:
-    """Get estimated intensity for a zone based on time of day."""
-    hour = time.localtime().tm_hour
-    day_val, night_val = _FALLBACK_INTENSITY.get(zone, (400, 500))
-    return day_val if 6 <= hour < 18 else night_val
+    """Annual average intensity for a zone; sub-national zones use their
+    country's value, unknown zones the world average."""
+    return float(_FALLBACK_INTENSITY.get(_table_key(zone), FALLBACK_GLOBAL_INTENSITY))
+
+
+def _windows_region_country() -> str:
+    """ISO-2 country of the Windows "Country or region" setting, or ""."""
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        geo_id = kernel32.GetUserGeoID(16)  # GEOCLASS_NATION
+        buf = ctypes.create_unicode_buffer(8)
+        if kernel32.GetGeoInfoW(geo_id, 4, buf, len(buf), 0):  # GEO_ISO2
+            return buf.value.strip().upper()
+    except Exception:
+        pass
+    return ""
+
+
+def _timezone_country() -> str:
+    """Country of the IANA time zone (TZ, /etc/timezone, /etc/localtime), or ""."""
+    names = [os.environ.get("TZ", "").lstrip(":")]
+    try:
+        with open("/etc/timezone") as f:
+            names.append(f.read().strip())
+    except OSError:
+        pass
+    try:
+        link = os.path.realpath("/etc/localtime")
+        if "zoneinfo/" in link:
+            names.append(link.split("zoneinfo/", 1)[1])
+    except OSError:
+        pass
+    for name in names:
+        if name in _TIMEZONE_TO_COUNTRY:
+            return _TIMEZONE_TO_COUNTRY[name]
+    return ""
+
+
+def _locale_country() -> str:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            code = locale.getdefaultlocale()[0] or ""
+    except Exception:
+        code = ""
+    # Locale looks like "pl_PL", "en_GB", "en_US".
+    return code.split("_", 1)[1].upper()[:2] if "_" in code else ""
 
 
 def _local_zone_guess() -> Tuple[str, str]:
-    """Best-effort zone guess from the system locale when there is no network.
+    """Zone guess without network: Windows region setting, time zone, locale.
 
-    Returns (zone_code, description) or ("", "") when nothing can be inferred.
-    This lets the tracker work fully offline (no internet, no git) instead of
-    returning an empty zone.
+    Returns (zone_code, description) or ("", "").
     """
-    try:
-        code = locale.getdefaultlocale()[0] or ""
-    except Exception:
-        code = ""
-
-    # Locale looks like "pl_PL", "en_GB", "en_US"; the part after "_" is the
-    # ISO country code we map to an Electricity Maps zone.
-    country = ""
-    if "_" in code:
-        country = code.split("_", 1)[1].upper()[:2]
-
-    if country and country in _COUNTRY_TO_ZONE:
-        zone = _COUNTRY_TO_ZONE[country]
-        return zone, f"{country} (offline/locale)"
+    sources = []
+    if platform.system() == "Windows":
+        sources.append(("region setting", _windows_region_country))
+    sources.append(("time zone", _timezone_country))
+    sources.append(("locale", _locale_country))
+    for label, fn in sources:
+        country = fn()
+        if country and country in _COUNTRY_TO_ZONE:
+            zone = _COUNTRY_TO_ZONE[country]
+            return zone, f"{country} (offline, from {label})"
     return "", ""
 
 
-def auto_detect_zone() -> Tuple[str, str]:
+def auto_detect_zone(refresh: bool = False) -> Tuple[str, str]:
     """
     Auto-detect electricity zone from IP geolocation.
 
-    Falls back to the system locale when the network is unavailable so the
-    tracker still works offline. Returns (zone_code, description); the zone is
-    "" only when neither the network nor the locale can be resolved.
+    Falls back to an offline guess when the network is unavailable. Returns
+    (zone_code, description); the zone is "" only when nothing can be resolved.
+    The result is cached for the process; pass ``refresh=True`` to detect again.
     """
-    for url in [
-        "https://ipapi.co/json/",
-        "https://ip-api.com/json/?fields=countryCode,city,regionName",
-    ]:
+    if _zone_cache and not refresh:
+        return _zone_cache["zone"], _zone_cache["desc"]
+
+    for url, field in _GEO_ENDPOINTS:
         try:
-            resp = requests.get(url, timeout=8)
+            resp = requests.get(url, timeout=5)
             resp.raise_for_status()
             data = resp.json()
-            country = data.get("country_code") or data.get("countryCode", "")
+            country = (data.get(field) or "").upper()
             city = data.get("city", "")
             if country:
                 zone = _COUNTRY_TO_ZONE.get(country, country)
-                return zone, f"{city} ({country})"
+                desc = f"{city} ({country})"
+                _zone_cache.update(zone=zone, desc=desc)
+                return zone, desc
         except Exception:
             continue
 
-    # Offline / blocked network: fall back to the locale-based guess.
-    return _local_zone_guess()
+    # Offline / blocked network: fall back to the local guess.
+    zone, desc = _local_zone_guess()
+    if zone:
+        _zone_cache.update(zone=zone, desc=desc)
+    return zone, desc
 
 
 def fetch_carbon_intensity(zone: str, api_key: str = "") -> Tuple[float, bool]:
@@ -81,15 +159,14 @@ def fetch_carbon_intensity(zone: str, api_key: str = "") -> Tuple[float, bool]:
     When ``zone`` is empty (detection failed) a neutral global-average
     estimate is used instead of crashing.
     """
-    if not zone:
-        return get_fallback_intensity(""), False
+    zone = normalize_zone(zone)
+    if not zone or not api_key:
+        # The Electricity Maps API answers only requests with a key.
+        return get_fallback_intensity(zone), False
 
     try:
         url = f"https://api.electricitymap.org/v3/carbon-intensity/latest?zone={zone}"
-        headers = {}
-        if api_key:
-            headers["auth-token"] = api_key
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(url, headers={"auth-token": api_key}, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         intensity = data.get("carbonIntensity") or data.get("value")

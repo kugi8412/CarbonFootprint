@@ -7,17 +7,28 @@
 std::function<void()> Daemon::stopCallback_;
 bool Daemon::isDaemon_ = false;
 std::atomic<bool> Daemon::stopFired_{false};
+std::atomic<bool> Daemon::shutdownComplete_{false};
+
+void Daemon::NotifyShutdownComplete() {
+    shutdownComplete_ = true;
+}
 
 #ifdef PLATFORM_WINDOWS
 
 BOOL WINAPI Daemon::ConsoleHandler(DWORD signal) {
-    if (signal == CTRL_C_EVENT || signal == CTRL_BREAK_EVENT || signal == CTRL_CLOSE_EVENT) {
+    if (signal == CTRL_C_EVENT || signal == CTRL_BREAK_EVENT || signal == CTRL_CLOSE_EVENT ||
+        signal == CTRL_LOGOFF_EVENT || signal == CTRL_SHUTDOWN_EVENT) {
         // Prevent re-entry: only fire once
         bool expected = false;
         if (stopFired_.compare_exchange_strong(expected, true)) {
             if (stopCallback_) {
                 stopCallback_();
             }
+        }
+        // Windows ends the process when this handler returns: wait for the
+        // report to be saved
+        if (signal != CTRL_C_EVENT && signal != CTRL_BREAK_EVENT) {
+            for (int i = 0; i < 45 && !shutdownComplete_; ++i) Sleep(100);
         }
         return TRUE;
     }

@@ -30,6 +30,7 @@ REM 1) Prefer Visual Studio if it is installed (uses vswhere).
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if exist "%VSWHERE%" (
     for /f "usebackq tokens=*" %%v in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property catalog_productLineVersion 2^>nul`) do (
+        if "%%v"=="2026" set "GEN_ARGS=-G "Visual Studio 18 2026" -A x64"
         if "%%v"=="2022" set "GEN_ARGS=-G "Visual Studio 17 2022" -A x64"
         if "%%v"=="2019" set "GEN_ARGS=-G "Visual Studio 16 2019" -A x64"
         if "%%v"=="2017" set "GEN_ARGS=-G "Visual Studio 15 2017 Win64""
@@ -67,16 +68,20 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
+REM Visual Studio puts the binary in Release\, MinGW in the build dir itself.
+set "BIN=build\carbon_tracker.exe"
+if exist Release\carbon_tracker.exe set "BIN=build\Release\carbon_tracker.exe"
+
 echo.
 echo ===================================
 echo  Build successful!
-echo  Binary: build\Release\carbon_tracker.exe
+echo  Binary: %BIN%
 echo ===================================
 echo.
 echo Usage:
-echo   build\Release\carbon_tracker.exe
-echo   build\Release\carbon_tracker.exe --start --zone PL
-echo   build\Release\carbon_tracker.exe --help
+echo   %BIN%
+echo   %BIN% --start --zone PL
+echo   %BIN% --help
 echo.
 
 cd ..

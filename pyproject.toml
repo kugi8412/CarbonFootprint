@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,26 +7,28 @@ name = "carbon-footprint-tracker"
 dynamic = ["version"]
 description = "Track and compute the carbon footprint of your computer usage in real-time. Per-process energy monitoring, auto hardware detection, live grid carbon intensity, GUI, CLI, and project file management."
 readme = "README.md"
-license = {text = "MIT"}
-requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
 authors = [
     {name = "Jakub Giezgała", email = "kugibioinformatyk4@gmail.com"},
 ]
-keywords = ["carbon", "footprint", "tracker", "energy", "green-computing"]
+keywords = ["carbon", "footprint", "tracker", "energy", "green-computing", "co2", "hpc", "slurm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: C++",
     "Topic :: Scientific/Engineering",
     "Topic :: System :: Monitoring",
@@ -42,8 +44,8 @@ gui = [
 ]
 dev = [
     "pytest>=7.0",
-    "build>=0.10",
-    "twine>=4.0",
+    "build>=1.0",
+    "twine>=5.0",
 ]
 all = [
     "carbon-footprint-tracker[gui,dev]",
@@ -57,7 +59,7 @@ Issues = "https://github.com/kugi8412/CarbonFootprint/issues"
 
 [project.scripts]
 carbon-tracker = "carbon_tracker.cli:main"
-carbon-tracker-gui = "carbon_tracker.gui:main"
+carbon-tracker-gui = "carbon_tracker.cli:gui_main"
 
 [tool.setuptools.dynamic]
 version = {attr = "carbon_tracker._version.__version__"}
@@ -66,5 +68,5 @@ version = {attr = "carbon_tracker._version.__version__"}
 where = ["."]
 include = ["carbon_tracker*"]
 
-[tool.setuptools.package-data]
-carbon_tracker = ["*.json", "*.exe", "carbon_tracker"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]

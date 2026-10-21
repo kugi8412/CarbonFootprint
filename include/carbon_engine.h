@@ -4,10 +4,17 @@
 #include "power_monitor.h"
 #include "screen_monitor.h"
 #include "carbon_api.h"
+#include <condition_variable>
 
 // ============================================================
 // Carbon Footprint Engine - Main tracking logic
 // ============================================================
+
+// Energy not attributed to a tracked app (OS, display, other processes)
+constexpr const char* OTHER_APP_NAME = "(other: system + untracked)";
+
+// Process key: lower case, without ".exe"
+std::string AppKey(const std::string& name);
 
 struct AppUsageData {
     std::string appName;
@@ -18,6 +25,7 @@ struct AppUsageData {
     double peakCpuPercent;        // peak CPU usage observed
     std::map<int, double> carbonByHour; // hour (0-23) -> grams CO2
     std::map<int, double> energyByHour; // hour (0-23) -> kWh
+    std::map<int, double> secondsByHour; // hour (0-23) -> seconds covered
     bool isActive;  // true if currently being monitored
     int sampleCount;
 
@@ -40,10 +48,10 @@ struct BrowserTabFilter {
 // Previous session data for import/projection
 struct PreviousSession {
     std::string description;
-    double durationSeconds;
-    double energyKwh;
-    double carbonGrams;
-    double avgIntensity;         // gCO2/kWh
+    double durationSeconds = 0.0;
+    double energyKwh = 0.0;
+    double carbonGrams = 0.0;
+    double avgIntensity = 0.0;         // gCO2/kWh
     std::map<std::string, double> appCarbonGrams; // per-app breakdown
 };
 
@@ -58,6 +66,10 @@ struct EngineConfig {
     double baseSystemWatts;
     bool isLaptop;
     bool autoDetectedHardware;  // true if hardware was auto-detected
+    // Detected hardware, written to the JSON report
+    std::string cpuName;
+    std::string gpuName;
+    int cpuCores = 0;
 };
 
 class CarbonEngine {
@@ -73,6 +85,8 @@ private:
     std::atomic<bool> inputReady_;  // signals new user input available
     std::thread monitorThread_;
     std::thread apiThread_;
+    std::mutex stopMutex_;
+    std::condition_variable stopCv_;  // wakes the monitor loop on Stop()
 
     double sessionStartTime_;
     double totalSessionCarbonGrams_;
@@ -97,8 +111,14 @@ public:
     // Start monitoring
     void Start();
 
-    // Stop monitoring
+    // Stop monitoring and join the worker threads (call from the main thread)
     void Stop();
+
+    // Only sets the stop flag; safe in a signal or console handler
+    void RequestStop();
+
+    // Session start as Unix epoch seconds
+    double GetSessionStartEpoch() const;
 
     // Check if running
     bool IsRunning() const;

@@ -339,7 +339,7 @@ class ActivityTracker:
         """Generate a human-readable carbon footprint report."""
         lines = []
         lines.append("=" * 60)
-        lines.append("  CARBON FOOTPRINT — ACTIVITIES REPORT")
+        lines.append("  CARBON FOOTPRINT - ACTIVITIES REPORT")
         lines.append("=" * 60)
         lines.append("")
 

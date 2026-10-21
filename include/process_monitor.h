@@ -48,4 +48,6 @@ public:
 private:
     static std::map<std::string, PerProcessCpuState> processStates_;
     static std::mutex statesMutex_;
+    // Drop per-PID CPU state not updated for a minute (exited processes).
+    static void PruneProcessStates(double now);
 };

@@ -10,6 +10,8 @@ Gaussian Mixture Model (GMM) fits the *distribution* of hourly carbon/energy
 rates, giving a better expected value plus an uncertainty range and the
 dominant usage modes - both for the whole machine and for each application.
 
+A sample is a rate (g/h, kWh/h): an hour bucket divided by the time it covers.
+
 The GMM here is a small, dependency-free 1-D Expectation-Maximisation
 implementation (no numpy / sklearn required).
 """
@@ -19,6 +21,7 @@ import random
 from typing import Dict, List, Tuple
 
 from carbon_tracker.models import SessionData
+from carbon_tracker.globals import MIN_FORECAST_BUCKET_SEC, SECONDS_PER_HOUR
 
 # 95% interval multiplier for a normal distribution.
 _Z_95 = 1.959963985
@@ -50,7 +53,10 @@ class GaussianMixture1D:
         tol: float = 1e-6,
         seed: int = 12345,
     ) -> "GaussianMixture1D":
-        data = [float(s) for s in samples if s is not None and s >= 0]
+        data = [
+            float(s) for s in samples
+            if s is not None and math.isfinite(s) and s >= 0
+        ]
         self.n_samples = len(data)
 
         if not data:
@@ -125,11 +131,11 @@ class GaussianMixture1D:
         return self
 
     def mean(self) -> float:
-        return sum(w * m for w, m in zip(self.weights, self.means))
+        return max(sum(w * m for w, m in zip(self.weights, self.means)), 0.0)
 
     def variance(self) -> float:
         # Law of total variance for a mixture.
-        mu = self.mean()
+        mu = sum(w * m for w, m in zip(self.weights, self.means))
         return sum(
             w * (v + m * m) for w, m, v in zip(self.weights, self.means, self.variances)
         ) - mu * mu
@@ -143,23 +149,35 @@ class GaussianMixture1D:
 
     def components(self) -> List[dict]:
         comps = [
-            {"weight": w, "rate": m, "std": math.sqrt(max(v, 0.0))}
+            {"weight": w, "rate": max(m, 0.0), "std": math.sqrt(max(v, 0.0))}
             for w, m, v in zip(self.weights, self.means, self.variances)
         ]
         comps.sort(key=lambda c: -c["weight"])
         return comps
 
 
-def _hourly_samples(session: SessionData) -> Tuple[List[float], List[float]]:
-    """Aggregate per-app hourly carbon/energy into whole-system per-hour samples."""
-    carbon: Dict[int, float] = {}
-    energy: Dict[int, float] = {}
-    for app in session.apps.values():
-        for hr, val in app.carbon_by_hour.items():
-            carbon[hr] = carbon.get(hr, 0.0) + val
-        for hr, val in app.energy_by_hour.items():
-            energy[hr] = energy.get(hr, 0.0) + val
-    return list(carbon.values()), list(energy.values())
+def _rate_samples(
+    carbon_by_hour: Dict[int, float],
+    energy_by_hour: Dict[int, float],
+    seconds_by_hour: Dict[int, float],
+    total_carbon: float,
+    total_energy: float,
+    total_seconds: float,
+) -> Tuple[List[float], List[float]]:
+    """Per-hour (g/h, kWh/h) rate samples; the period average when bucket
+    durations are unknown (files from older versions)."""
+    carbon: List[float] = []
+    energy: List[float] = []
+    for hr, secs in seconds_by_hour.items():
+        if secs >= MIN_FORECAST_BUCKET_SEC:
+            hours = secs / SECONDS_PER_HOUR
+            carbon.append(carbon_by_hour.get(hr, 0.0) / hours)
+            energy.append(energy_by_hour.get(hr, 0.0) / hours)
+    if not seconds_by_hour and total_seconds >= MIN_FORECAST_BUCKET_SEC:
+        hours = total_seconds / SECONDS_PER_HOUR
+        carbon.append(total_carbon / hours)
+        energy.append(total_energy / hours)
+    return carbon, energy
 
 
 def _build_forecast(
@@ -211,7 +229,7 @@ def forecast_project(sessions: List[SessionData], hours: float) -> dict:
         "per_app": {},
     }
 
-    if not sessions or hours <= 0:
+    if not sessions or not hours or hours <= 0 or not math.isfinite(hours):
         result["method"] = "none"
         return result
 
@@ -224,28 +242,31 @@ def forecast_project(sessions: List[SessionData], hours: float) -> dict:
     app_energy: Dict[str, List[float]] = {}
 
     for session in sessions:
-        sess_hours = session.duration_seconds / 3600.0
-        total_hours += sess_hours
+        total_hours += max(session.duration_seconds, 0.0) / SECONDS_PER_HOUR
 
-        c_hourly, e_hourly = _hourly_samples(session)
-        if c_hourly:
-            overall_carbon.extend(c_hourly)
-        elif sess_hours > 1e-6:
-            overall_carbon.append(session.total_carbon_grams / sess_hours)
-        if e_hourly:
-            overall_energy.extend(e_hourly)
-        elif sess_hours > 1e-6:
-            overall_energy.append(session.total_energy_kwh / sess_hours)
+        # Whole-system rates come from the session totals
+        c, e = _rate_samples(
+            session.carbon_by_hour,
+            session.energy_by_hour,
+            session.seconds_by_hour,
+            session.total_carbon_grams,
+            session.total_energy_kwh,
+            session.duration_seconds,
+        )
+        overall_carbon.extend(c)
+        overall_energy.extend(e)
 
         for name, app in session.apps.items():
-            cs = list(app.carbon_by_hour.values())
-            es = list(app.energy_by_hour.values())
-            if not cs and app.total_active_seconds > 1e-6:
-                rate_h = app.total_active_seconds / 3600.0
-                cs = [app.total_carbon_grams / rate_h]
-                es = [app.total_energy_kwh / rate_h]
-            app_carbon.setdefault(name, []).extend(cs)
-            app_energy.setdefault(name, []).extend(es)
+            c, e = _rate_samples(
+                app.carbon_by_hour,
+                app.energy_by_hour,
+                app.seconds_by_hour,
+                app.total_carbon_grams,
+                app.total_energy_kwh,
+                app.total_active_seconds,
+            )
+            app_carbon.setdefault(name, []).extend(c)
+            app_energy.setdefault(name, []).extend(e)
 
     result["based_on_hours"] = total_hours
 
@@ -256,6 +277,8 @@ def forecast_project(sessions: List[SessionData], hours: float) -> dict:
     result["based_on_hours"] = total_hours
 
     for name in app_carbon:
+        if not app_carbon[name]:
+            continue
         app_fc = _build_forecast(
             app_carbon.get(name, []), app_energy.get(name, []), hours
         )

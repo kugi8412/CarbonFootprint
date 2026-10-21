@@ -41,12 +41,13 @@ import json
 import shutil
 import platform
 import subprocess
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from dataclasses import dataclass, field
 
 from carbon_tracker.globals import (
     _CPU_TDP_TABLE,
     _GPU_TDP_TABLE,
+    _HPC_CPU_TDP_TABLE,
     _HPC_GPU_TDP_TABLE,
     SECONDS_PER_HOUR,
     WATTS_PER_KW,
@@ -233,6 +234,37 @@ def _detect_cpu_model() -> str:
     return ""
 
 
+def _detect_cores_per_socket() -> int:
+    """Physical cores per CPU socket of this node (0 if unknown)."""
+    try:
+        if os.path.exists("/proc/cpuinfo"):
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("cpu cores"):
+                        return int(line.split(":", 1)[1])
+    except (OSError, ValueError):
+        pass
+    if shutil.which("lscpu"):
+        try:
+            out = subprocess.check_output(
+                ["lscpu"], text=True, stderr=subprocess.DEVNULL, timeout=5
+            )
+            for line in out.splitlines():
+                if line.lower().startswith("core(s) per socket"):
+                    return int(line.split(":", 1)[1])
+        except (subprocess.SubprocessError, OSError, ValueError):
+            pass
+    if platform.system() != "Linux":
+        # Windows/macOS: physical cores of this (single-socket) machine.
+        try:
+            import psutil
+
+            return psutil.cpu_count(logical=False) or 0
+        except ImportError:
+            pass
+    return 0
+
+
 def _detect_gpu_model() -> str:
     """Read the first GPU model via nvidia-smi / rocm-smi when available."""
     if shutil.which("nvidia-smi"):
@@ -360,12 +392,20 @@ def _count_nodefile(path: Optional[str]) -> int:
 
 def _resolve_job_power(job: HPCJobInfo) -> None:
     """Fill in per-core and per-GPU power figures from the detected models."""
-    # CPU: prefer a model-specific package TDP divided across the node's cores.
-    pkg_tdp = _match_tdp(job.cpu_model, _CPU_TDP_TABLE)
+    # CPU: package TDP spread over the socket's physical cores
+    pkg_tdp, socket_cores = 0.0, 0
+    name = (job.cpu_model or "").lower()
+    for pattern, tdp, cores in _HPC_CPU_TDP_TABLE:
+        if name and re.search(pattern.lower(), name):
+            pkg_tdp, socket_cores = float(tdp), cores
+            break
+    if pkg_tdp <= 0:
+        pkg_tdp = _match_tdp(job.cpu_model, _CPU_TDP_TABLE)
+    if not socket_cores:
+        socket_cores = _detect_cores_per_socket()
     job.cpu_tdp_watts = pkg_tdp
-    cores_for_tdp = _env_int("SLURM_CPUS_ON_NODE") or job.num_cpus or 1
-    if pkg_tdp > 0 and cores_for_tdp > 0:
-        job.watts_per_core = pkg_tdp / cores_for_tdp
+    if pkg_tdp > 0 and socket_cores > 0:
+        job.watts_per_core = pkg_tdp / socket_cores
     if job.watts_per_core <= 0:
         job.watts_per_core = HPC_DEFAULT_WATTS_PER_CORE
 
@@ -758,7 +798,16 @@ def build_hpc_report(
         auto_detect_zone,
         fetch_carbon_intensity,
         get_fallback_intensity,
+        normalize_zone,
     )
+
+    # Utilisation: busy fraction of the allocated cores/GPUs
+    for label, value in (("cpu_utilization", cpu_utilization),
+                         ("gpu_utilization", gpu_utilization)):
+        if not 0.0 < value <= 1.0:
+            raise ValueError(f"{label} must be in (0, 1], got {value}")
+    if pue < 1.0:
+        raise ValueError(f"PUE must be >= 1.0, got {pue}")
 
     if job is None:
         job = detect_hpc_job() or HPCJobInfo()
@@ -787,15 +836,21 @@ def build_hpc_report(
 
     # --- grid intensity -------------------------------------------------------
     if not zone:
-        detected, _ = auto_detect_zone()
+        detected, desc = auto_detect_zone()
         zone = detected or ""
+        if zone and "offline" in desc:
+            report.notes.append(
+                f"Grid zone {zone} detected offline ({desc}): the node has no "
+                "internet access for IP geolocation."
+            )
+    zone = normalize_zone(zone)
     report.zone = zone
     if zone:
         intensity, is_real = fetch_carbon_intensity(zone, api_key)
     else:
-        intensity, is_real = get_fallback_intensity("PL"), False
+        intensity, is_real = get_fallback_intensity(""), False
         report.notes.append(
-            "Grid zone could not be detected; used a generic fallback intensity. "
+            "Grid zone could not be detected; used the world average intensity. "
             "Pass --zone (e.g. --zone DE) for an accurate figure."
         )
     report.intensity = intensity
@@ -811,6 +866,20 @@ def build_hpc_report(
         report.energy_kwh = measured_energy_kwh
         report.energy_measured = True
         report.energy_source = measured_source or "measured"
+        parts = report.energy_source.split("+")
+        if "nvidia-smi" in parts and len(parts) == 1:
+            report.notes.append(
+                "Only the GPU was measured: CPU package power could not be read "
+                "(Linux RAPL energy counters need root since kernel 5.10; on "
+                "Windows run LibreHardwareMonitor). CPU energy is NOT included; "
+                f"the model estimate for {job.num_cpus} allocated core(s) would add "
+                f"{cpu_w * report.elapsed_seconds / SECONDS_PER_HOUR:.2f} Wh."
+            )
+        if "nvidia-smi" in parts:
+            report.notes.append(
+                "nvidia-smi reports whole-board GPU power: on a shared GPU, other "
+                "users' work during the run is included."
+            )
     elif sacct.get("energy_kwh"):
         report.energy_kwh = sacct["energy_kwh"]
         report.energy_measured = True
@@ -838,22 +907,23 @@ def build_hpc_report(
 # ============================================================
 # `hpc run`: wrap a command, measure wall time + power while it runs
 # ============================================================
-def _sample_power_once(has_nvidia: bool) -> Optional[float]:
-    """Instantaneous IT power (W) from RAPL + nvidia-smi, or None if neither."""
+def _sample_power_once(has_nvidia: bool) -> Tuple[Optional[float], List[str]]:
+    """Instantaneous IT power (W) and the sensors that produced it, e.g.
+    ``(94.0, ["nvidia-smi"])``; ``(None, [])`` when nothing was readable."""
     from carbon_tracker.power import read_cpu_power_watts, read_gpu_power_draw
 
     total = 0.0
-    got = False
-    cpu_w, _src = read_cpu_power_watts()
+    sources: List[str] = []
+    cpu_w, cpu_src = read_cpu_power_watts()
     if cpu_w and cpu_w > 0:
         total += cpu_w
-        got = True
+        sources.append(cpu_src or "cpu-sensor")
     if has_nvidia:
         gpu_w = read_gpu_power_draw()
         if gpu_w and gpu_w > 0:
             total += gpu_w
-            got = True
-    return total if got else None
+            sources.append("nvidia-smi")
+    return (total if sources else None), sources
 
 
 def run_and_measure(
@@ -863,27 +933,39 @@ def run_and_measure(
     """Run *command*, integrating measured power over its lifetime.
 
     Returns ``(exit_code, elapsed_seconds, measured_energy_kwh_or_None,
-    source)``. ``measured_energy_kwh`` is ``None`` when no node power sensor was
-    readable (the report then falls back to estimation).
+    source)``. ``source`` names the sensors actually read ("nvidia-smi" when
+    the CPU counters are not readable). ``measured_energy_kwh`` is ``None``
+    when no node power sensor was readable (the report then falls back to
+    estimation).
     """
     import threading
 
     has_nvidia = shutil.which("nvidia-smi") is not None
     energy_j = 0.0
     samples = 0
+    sources: List[str] = []
     stop = threading.Event()
 
     def _sampler():
         nonlocal energy_j, samples
-        last = time.time()
-        while not stop.is_set():
-            watts = _sample_power_once(has_nvidia)
+        last, last_watts = time.time(), None
+        while True:
+            watts, srcs = _sample_power_once(has_nvidia)
             now = time.time()
+            # Each reading holds until the next one
+            held = last_watts if last_watts is not None else watts
+            if held is not None:
+                energy_j += held * (now - last)
             if watts is not None:
-                energy_j += watts * (now - last)
                 samples += 1
+                last_watts = watts
+                sources.extend(s for s in srcs if s not in sources)
             last = now
-            stop.wait(sample_interval)
+            if stop.wait(sample_interval):
+                break
+        # Interval after the last reading
+        if last_watts is not None:
+            energy_j += last_watts * (time.time() - last)
 
     sampler = threading.Thread(target=_sampler, daemon=True)
     start = time.time()
@@ -893,9 +975,9 @@ def run_and_measure(
         exit_code = proc.wait()
     finally:
         stop.set()
-        sampler.join(timeout=sample_interval + 2)
+        sampler.join(timeout=sample_interval + 10)
     elapsed = time.time() - start
 
     if samples > 0 and energy_j > 0:
-        return exit_code, elapsed, energy_j / JOULES_PER_KWH, "rapl+nvidia-smi"
+        return exit_code, elapsed, energy_j / JOULES_PER_KWH, "+".join(sources)
     return exit_code, elapsed, None, ""

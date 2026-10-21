@@ -61,7 +61,7 @@ echo
 echo "Usage:"
 echo "  ./build/carbon_tracker"
 echo "  ./build/carbon_tracker --start --zone PL"
-echo "  ./build/carbon_tracker --start --daemon --zone US-CAL"
+echo "  ./build/carbon_tracker --start --daemon --zone US-CAL-CISO"
 echo "  ./build/carbon_tracker --help"
 echo
 

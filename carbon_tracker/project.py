@@ -16,6 +16,22 @@ from typing import Dict, List, Optional
 from carbon_tracker.models import SessionData
 from carbon_tracker.activities import Activity
 
+PROJECT_SUFFIX = ".carbon.json"
+
+
+def normalize_project_path(path: str) -> str:
+    """Return the path with exactly one ".carbon.json" suffix."""
+    base = path
+    while True:
+        lower = base.lower()
+        if lower.endswith(".json"):
+            base = base[: -len(".json")]
+        elif lower.endswith(".carbon"):
+            base = base[: -len(".carbon")]
+        else:
+            break
+    return base + PROJECT_SUFFIX
+
 
 class CarbonProject:
     """
@@ -35,7 +51,9 @@ class CarbonProject:
         print(project.project_future(hours=8))
     """
 
-    def __init__(self, name: str = "Untitled Project", description: str = ""):
+    def __init__(
+        self, name: str = "Untitled Project", description: str = "", zone: str = ""
+    ):
         self.name = name
         self.description = description
         self.created_at = time.time()
@@ -43,14 +61,16 @@ class CarbonProject:
         self.sessions: List[SessionData] = []
         self.selected_apps: List[str] = []
         self.selected_files: List[str] = []  # project source files to track context
-        self.zone: str = ""
+        self.zone: str = zone
         self.api_key: str = ""
         self.tab_filters: List[dict] = []
         self.tags: List[str] = []
         self.activities: List[Activity] = []  # non-electrical activities
+        # Set by load() for a session report: save it under a new name
+        self.loaded_from_report = False
 
     def save(self, filepath: str):
-        """Save project to a .carbon.json file."""
+        """Save project to a .carbon.json file (temp file + rename)."""
         data = {
             "version": "1.1",
             "project_id": self.project_id,
@@ -66,14 +86,33 @@ class CarbonProject:
             "sessions": [s.to_dict() for s in self.sessions],
         }
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-        with open(filepath, "w", encoding="utf-8") as f:
+        tmp = f"{filepath}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, filepath)
 
     @classmethod
     def load(cls, filepath: str) -> "CarbonProject":
-        """Load project from a .carbon.json file."""
+        """Load project from a .carbon.json file.
+
+        A standalone session report (``carbon_report_*.json``) is accepted too
+        and becomes a one-session project with ``loaded_from_report`` set.
+        """
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        if "sessions" not in data:
+            if "session_id" not in data:
+                raise ValueError(
+                    f"{filepath} is neither a project nor a session report"
+                    + (" (it is an HPC job report)"
+                       if data.get("type") == "hpc_job_report" else "")
+                )
+            proj = cls(name=Path(filepath).name.split(".")[0])
+            proj.zone = data.get("zone", "")
+            proj.add_session(SessionData.from_dict(data))
+            proj.loaded_from_report = True
+            return proj
 
         proj = cls()
         proj.project_id = data.get("project_id", "")
@@ -91,10 +130,14 @@ class CarbonProject:
 
     # Session management
 
-    def add_session(self, session: SessionData):
-        """Add a completed monitoring session."""
+    def add_session(self, session: SessionData) -> bool:
+        """Add a completed monitoring session; False if it is already there."""
         session.session_id = session.session_id or f"session_{int(time.time())}"
+        for s in self.sessions:
+            if s.session_id == session.session_id and s.start_time == session.start_time:
+                return False
         self.sessions.append(session)
+        return True
 
     def remove_session(self, session_id: str):
         self.sessions = [s for s in self.sessions if s.session_id != session_id]
@@ -117,9 +160,11 @@ class CarbonProject:
     # Aggregation and reporting
 
     def total_carbon_grams(self) -> float:
-        return sum(s.total_carbon_grams for s in self.sessions) + sum(
-            a.co2_grams for a in self.activities
-        )
+        return self.sessions_carbon_grams() + self.activities_co2_grams()
+
+    def sessions_carbon_grams(self) -> float:
+        """CO2 of the monitored sessions only (electricity)."""
+        return sum(s.total_carbon_grams for s in self.sessions)
 
     def total_energy_kwh(self) -> float:
         return sum(s.total_energy_kwh for s in self.sessions)
@@ -128,8 +173,9 @@ class CarbonProject:
         return sum(s.duration_seconds for s in self.sessions) / 3600.0
 
     def carbon_per_hour(self) -> float:
+        """Electricity CO2 per monitored hour (activities are one-off, not hourly)."""
         hours = self.total_duration_hours()
-        return self.total_carbon_grams() / hours if hours > 0.001 else 0.0
+        return self.sessions_carbon_grams() / hours if hours > 0.001 else 0.0
 
     def per_app_totals(self) -> Dict[str, dict]:
         """Aggregate per-app data across all sessions."""
@@ -166,6 +212,8 @@ class CarbonProject:
         # Backward-compatible fields expected by existing CLI/GUI callers.
         result.setdefault("projected_hours", hours)
         result.setdefault("based_on_sessions", len(self.sessions))
+        if not hours or hours <= 0:
+            return result
         if result.get("method") == "none" or result.get("n_samples", 0) == 0:
             # No usable distribution: fall back to a plain average rate.
             rate = self.carbon_per_hour()
@@ -199,7 +247,7 @@ class CarbonProject:
         app_totals = self.per_app_totals()
 
         if app_totals:
-            lines.append(f"  <== Per-App Totals ==>")
+            lines.append("  <== Per-App Totals ==>")
             for name, data in sorted(
                 app_totals.items(), key=lambda x: -x[1]["total_carbon_grams"]
             ):

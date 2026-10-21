@@ -26,7 +26,7 @@ private:
     CarbonIntensityData ParseResponse(const std::string& json);
 
     // Fallback values by region when API is unavailable
-    static double GetFallbackIntensity(const std::string& zone, int hour);
+    static double GetFallbackIntensity(const std::string& zone);
 
     // Map country code to electricity zone
     static std::string CountryToZone(const std::string& countryCode);
@@ -46,8 +46,12 @@ public:
     // Get zone
     std::string GetZone() const;
 
-    // Auto-detect country/zone from IP geolocation
+    // Auto-detect country/zone from IP geolocation, or offline from the
+    // Windows region setting, time zone or locale
     static std::string AutoDetectZone();
+
+    // Upper-case zone ID; old codes are mapped to Electricity Maps IDs
+    static std::string NormalizeZone(const std::string& zone);
 
     // List of common zones
     static std::vector<std::pair<std::string, std::string>> GetCommonZones();

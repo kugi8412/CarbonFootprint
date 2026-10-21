@@ -7,7 +7,7 @@ macOS, and WSL.
 
 ## 1. Requirements
 
-- **Python 3.8+** (the package). Check with `python --version` (or `py -3 --version` on Windows).
+- **Python 3.9+** (the package). Check with `python --version` (or `py -3 --version` on Windows).
 - Optional: **PyQt5** for the desktop GUI.
 - Optional (for *measured* CPU/GPU power instead of estimates): see [section 5](#5-get-real-measured-power-optional).
 
@@ -85,7 +85,7 @@ carbon-tracker detect
 ```
 
 - Best case: real CPU power is read from **Intel/AMD RAPL** automatically
-  (`/sys/class/powercap`) — **no extra tools, works on AC**.
+  (`/sys/class/powercap`): **no extra tools, works on AC**.
 - If RAPL is permission-restricted: `sudo chmod -R a+r /sys/class/powercap/intel-rapl*`.
 - GUI needs X11/Wayland; for headless use the CLI.
 
@@ -125,7 +125,7 @@ By default, power is **measured** when a source is available and otherwise
 
 | Platform | What you get out of the box | How to measure the **CPU** on AC |
 |----------|-----------------------------|----------------------------------|
-| **Linux (native)** | CPU via RAPL + GPU via nvidia-smi | already measured — nothing to do |
+| **Linux (native)** | CPU via RAPL + GPU via nvidia-smi | already measured, nothing to do |
 | **Windows** | GPU via nvidia-smi | run **LibreHardwareMonitor** (see below) |
 | **macOS** | whole-system on battery only | run on battery, or use a sensor tool |
 | **WSL** | battery state from host | use LibreHardwareMonitor on Windows |
@@ -171,11 +171,20 @@ the same way (RAPL on Linux, `nvidia-smi`/`rocm-smi` for GPUs).
 | Symptom | Fix |
 |---------|-----|
 | `python` runs Python 2 | use `py -3` (Windows) or `python3` (Linux/macOS) |
-| `detect` shows **estimated** power on a laptop | you're on AC — unplug, or set up a sensor (section 5) |
+| `detect` shows **estimated** power on a laptop | you're on AC: unplug, or set up a sensor (section 5) |
 | CPU power is `None` on Windows | LibreHardwareMonitor not running / not elevated |
-| GPU power is `None` | non-NVIDIA GPU without nvidia-smi — use LibreHardwareMonitor |
+| GPU power is `None` | non-NVIDIA GPU without nvidia-smi: use LibreHardwareMonitor |
 | GUI won't start | install the GUI extra: `pip install "carbon-footprint-tracker[gui]"` |
-| `Could not find the Qt platform plugin "windows"` | fixed automatically since 1.1.5 — reinstall/upgrade: `pip install -U "carbon-footprint-tracker[gui]"` |
+| `Could not find the Qt platform plugin "windows"` | fixed since 1.1.5; upgrade with `pip install -U "carbon-footprint-tracker[gui]"` |
 | `pip` can't find `psutil>=5.9.0` | upgrade the tracker to **1.1.5+** (needs only `psutil>=5.8.0`) |
 | `build.bat` fails: `CMAKE_CXX_COMPILER not set` / `nmake ... no such file` | install Visual Studio (Desktop C++) or MinGW-w64; `build.bat` (1.1.5+) auto-detects them from a normal prompt |
-| Forecast/import ignores my `.json` files | fixed in 1.1.5 — the file dialog now lists all `*.json` files, not only `*.carbon.json` |
+| Forecast/import ignores my `.json` files | fixed in 1.1.5: the file dialog lists all `*.json` files |
+| A laptop shows hundreds of watts (e.g. GPU TDP 5001 W) | fixed in 1.6.0: implausible TDPs from the driver are ignored |
+| Per-app rows don't add up to the totals | fixed in 1.6.0: the rest is shown as `(other: system + untracked)` |
+| Every session creates a new `carbon_report_*.json` | fixed in 1.6.0: with a project open, sessions are saved only in the project file |
+| Project saved as `name.carbon.carbon.json` | fixed in 1.6.0 |
+| Forecast shows near-zero or negative values | fixed in 1.6.0 |
+| Zone changes between sessions of one project | fixed in 1.6.0: all sessions of a project use its zone |
+| No internet (HPC node, offline laptop) | the zone is guessed from the Windows region setting, the time zone or the locale |
+| `hpc run` energy does not include the CPU | RAPL counters need root on Linux; the report says so and gives a CPU estimate |
+| Live API ignores `US-MIDA` / `US-CAL` | use `US-MIDA-PJM`, `US-CAL-CISO`, ... (the old codes still work since 1.6.0) |

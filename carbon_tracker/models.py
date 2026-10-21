@@ -5,8 +5,6 @@
 Data models for Carbon Footprint Tracker.
 """
 
-import time
-import json
 
 from typing import Dict, Optional
 from dataclasses import dataclass, field
@@ -54,6 +52,8 @@ class AppUsageData:
     peak_cpu_percent: float = 0.0
     carbon_by_hour: Dict[int, float] = field(default_factory=dict)
     energy_by_hour: Dict[int, float] = field(default_factory=dict)
+    # Seconds covered by each hour bucket
+    seconds_by_hour: Dict[int, float] = field(default_factory=dict)
     is_active: bool = True
     sample_count: int = 0
 
@@ -67,6 +67,7 @@ class AppUsageData:
             "peak_cpu_percent": self.peak_cpu_percent,
             "carbon_by_hour": {str(k): v for k, v in self.carbon_by_hour.items()},
             "energy_by_hour": {str(k): v for k, v in self.energy_by_hour.items()},
+            "seconds_by_hour": {str(k): v for k, v in self.seconds_by_hour.items()},
             "is_active": self.is_active,
             "sample_count": self.sample_count,
         }
@@ -82,6 +83,7 @@ class AppUsageData:
         obj.peak_cpu_percent = d.get("peak_cpu_percent", 0.0)
         obj.carbon_by_hour = {int(k): v for k, v in d.get("carbon_by_hour", {}).items()}
         obj.energy_by_hour = {int(k): v for k, v in d.get("energy_by_hour", {}).items()}
+        obj.seconds_by_hour = {int(k): v for k, v in d.get("seconds_by_hour", {}).items()}
         obj.is_active = d.get("is_active", True)
         obj.sample_count = d.get("sample_count", 0)
         return obj
@@ -102,6 +104,10 @@ class SessionData:
     avg_intensity: float = 0.0
     hardware: Optional[HardwareInfo] = None
     apps: Dict[str, AppUsageData] = field(default_factory=dict)
+    # Whole-system hourly buckets
+    carbon_by_hour: Dict[int, float] = field(default_factory=dict)
+    energy_by_hour: Dict[int, float] = field(default_factory=dict)
+    seconds_by_hour: Dict[int, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -116,6 +122,9 @@ class SessionData:
             "avg_intensity": self.avg_intensity,
             "hardware": self.hardware.to_dict() if self.hardware else None,
             "apps": {k: v.to_dict() for k, v in self.apps.items()},
+            "carbon_by_hour": {str(k): v for k, v in self.carbon_by_hour.items()},
+            "energy_by_hour": {str(k): v for k, v in self.energy_by_hour.items()},
+            "seconds_by_hour": {str(k): v for k, v in self.seconds_by_hour.items()},
         }
 
     @classmethod
@@ -133,24 +142,45 @@ class SessionData:
         hw = d.get("hardware")
         obj.hardware = HardwareInfo.from_dict(hw) if hw else None
         obj.apps = {k: AppUsageData.from_dict(v) for k, v in d.get("apps", {}).items()}
+        obj.carbon_by_hour = {int(k): v for k, v in d.get("carbon_by_hour", {}).items()}
+        obj.energy_by_hour = {int(k): v for k, v in d.get("energy_by_hour", {}).items()}
+        obj.seconds_by_hour = {int(k): v for k, v in d.get("seconds_by_hour", {}).items()}
         return obj
+
+    def unattributed(self) -> tuple:
+        """(energy_kwh, carbon_g) of the total not covered by the app rows;
+        non-zero only in files written by older versions."""
+        return (
+            self.total_energy_kwh - sum(a.total_energy_kwh for a in self.apps.values()),
+            self.total_carbon_grams - sum(a.total_carbon_grams for a in self.apps.values()),
+        )
 
     def summary(self) -> str:
         lines = []
         lines.append(f"<== Session: {self.description or self.session_id} ==>")
-        lines.append(f"  Duration:    {self.duration_seconds / 3600:.2f} hours")
+        secs = int(round(self.duration_seconds))
+        lines.append(
+            f"  Duration:    {secs // 3600}h {secs % 3600 // 60:02d}m {secs % 60:02d}s"
+        )
         lines.append(f"  Energy:      {self.total_energy_kwh * 1000:.4f} Wh")
         lines.append(f"  CO2:         {self.total_carbon_grams:.4f} g")
         lines.append(f"  Zone:        {self.zone}")
         lines.append(f"  Intensity:   {self.avg_intensity:.1f} gCO2/kWh")
         if self.apps:
-            lines.append(f"  Applications:")
+            lines.append("  Applications:")
             for name, app in self.apps.items():
                 lines.append(
                     f"    {name:25s} "
                     f"CPU={app.avg_cpu_percent:.1f}%  "
                     f"Energy={app.total_energy_kwh * 1000:.4f}Wh  "
                     f"CO2={app.total_carbon_grams:.4f}g"
+                )
+            rest_kwh, rest_g = self.unattributed()
+            if abs(rest_g) > 1e-6:
+                label = "(not attributed)" if rest_g > 0 else "(over-attributed)"
+                lines.append(
+                    f"    {label:25s} {'':10s}"
+                    f"Energy={rest_kwh * 1000:.4f}Wh  CO2={rest_g:.4f}g"
                 )
         return "\n".join(lines)
 

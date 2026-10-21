@@ -1,21 +1,39 @@
 #include "carbon_api.h"
+#include <cctype>
 
 // ============================================================
 // Carbon Intensity API Implementation
 // ============================================================
 
+// Zones not in the table: world average (Ember, 2025)
+static constexpr double kGlobalAverageIntensity = 458.0;
+
+std::string CarbonAPI::NormalizeZone(const std::string& zone) {
+    std::string z;
+    for (unsigned char c : zone) {
+        if (std::isalnum(c) || c == '-') z += static_cast<char>(std::toupper(c));
+    }
+    // Old codes that Electricity Maps does not accept
+    static const std::map<std::string, std::string> aliases = {
+        {"US-MIDA", "US-MIDA-PJM"}, {"US-CAL", "US-CAL-CISO"},
+        {"US-NY", "US-NY-NYIS"}, {"US-TEX", "US-TEX-ERCO"}, {"CL", "CL-SEN"},
+    };
+    auto it = aliases.find(z);
+    return it != aliases.end() ? it->second : z;
+}
+
 CarbonAPI::CarbonAPI(const std::string& zone, const std::string& apiKey)
-    : zone_(zone), apiKey_(apiKey) {
-    lastData_.intensity = GetFallbackIntensity(zone_, TimeUtil::CurrentHour());
+    : zone_(NormalizeZone(zone)), apiKey_(apiKey) {
+    lastData_.intensity = GetFallbackIntensity(zone_);
     lastData_.zone = zone_;
     lastData_.datetime = TimeUtil::Now();
     lastData_.isRealData = false;
 }
 
 void CarbonAPI::SetZone(const std::string& zone) {
-    zone_ = zone;
     std::lock_guard<std::mutex> lock(dataMutex_);
-    lastData_.intensity = GetFallbackIntensity(zone_, TimeUtil::CurrentHour());
+    zone_ = NormalizeZone(zone);
+    lastData_.intensity = GetFallbackIntensity(zone_);
     lastData_.zone = zone_;
     lastData_.isRealData = false;
 }
@@ -53,6 +71,8 @@ std::string CarbonAPI::HttpGet(const std::string& url, const std::string& authHe
     HINTERNET hSession = WinHttpOpen(L"CarbonTracker/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return "";
+    // Timeouts (ms): resolve, connect, send, receive
+    WinHttpSetTimeouts(hSession, 5000, 5000, 10000, 10000);
 
     HINTERNET hConnect = WinHttpConnect(hSession, wHost.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return ""; }
@@ -71,9 +91,14 @@ std::string CarbonAPI::HttpGet(const std::string& url, const std::string& authHe
         WinHttpAddRequestHeaders(hRequest, wHeader.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
     }
 
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
     if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
             WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-        WinHttpReceiveResponse(hRequest, NULL)) {
+        WinHttpReceiveResponse(hRequest, NULL) &&
+        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX) &&
+        status == 200) {
 
         DWORD dwSize = 0;
         DWORD dwDownloaded = 0;
@@ -97,8 +122,12 @@ std::string CarbonAPI::HttpGet(const std::string& url, const std::string& authHe
 #else // Linux / Mac
 
 std::string CarbonAPI::HttpGet(const std::string& url, const std::string& authHeader) {
+    // Arguments go into a single-quoted shell command
+    for (const std::string* s : {&url, &authHeader}) {
+        if (s->find_first_of("'\n\r") != std::string::npos) return "";
+    }
     // Use system curl command
-    std::string cmd = "curl -s --max-time 10";
+    std::string cmd = "curl -sf --max-time 10";
     if (!authHeader.empty()) {
         // Extract header value (format: "Header: value")
         cmd += " -H '" + authHeader + "'";
@@ -163,10 +192,10 @@ CarbonIntensityData CarbonAPI::ParseResponse(const std::string& json) {
             data.intensity = std::stod(intensityStr);
             data.isRealData = true;
         } catch (...) {
-            data.intensity = GetFallbackIntensity(zone_, TimeUtil::CurrentHour());
+            data.intensity = GetFallbackIntensity(zone_);
         }
     } else {
-        data.intensity = GetFallbackIntensity(zone_, TimeUtil::CurrentHour());
+        data.intensity = GetFallbackIntensity(zone_);
     }
 
     std::string dt = ExtractJsonValue(json, "datetime");
@@ -176,6 +205,13 @@ CarbonIntensityData CarbonAPI::ParseResponse(const std::string& json) {
 }
 
 bool CarbonAPI::FetchLatest() {
+    if (apiKey_.empty()) {
+        // The Electricity Maps API answers only requests with a key
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        lastData_.intensity = GetFallbackIntensity(zone_);
+        lastData_.isRealData = false;
+        return false;
+    }
     std::string url = "https://api.electricitymap.org/v3/carbon-intensity/latest?zone=" + zone_;
     std::string authHeader;
     if (!apiKey_.empty()) {
@@ -186,7 +222,7 @@ bool CarbonAPI::FetchLatest() {
     if (response.empty()) {
         std::cerr << "[API] Failed to fetch carbon intensity data. Using fallback.\n";
         std::lock_guard<std::mutex> lock(dataMutex_);
-        lastData_.intensity = GetFallbackIntensity(zone_, TimeUtil::CurrentHour());
+        lastData_.intensity = GetFallbackIntensity(zone_);
         lastData_.isRealData = false;
         return false;
     }
@@ -196,7 +232,7 @@ bool CarbonAPI::FetchLatest() {
     if (!errorMsg.empty()) {
         std::cerr << "[API] Error: " << errorMsg << ". Using fallback.\n";
         std::lock_guard<std::mutex> lock(dataMutex_);
-        lastData_.intensity = GetFallbackIntensity(zone_, TimeUtil::CurrentHour());
+        lastData_.intensity = GetFallbackIntensity(zone_);
         lastData_.isRealData = false;
         return false;
     }
@@ -219,51 +255,26 @@ CarbonIntensityData CarbonAPI::GetIntensity() {
     return lastData_;
 }
 
-double CarbonAPI::GetFallbackIntensity(const std::string& zone, int hour) {
-    // Average carbon intensity by zone (gCO2eq/kWh)
-    // Source: approximate values from electricitymap.org historical data
-    struct ZoneData {
-        double dayIntensity;    // 6:00-18:00 (more solar)
-        double nightIntensity;  // 18:00-6:00 (more fossil)
+double CarbonAPI::GetFallbackIntensity(const std::string& zone) {
+    // Lifecycle annual averages (gCO2eq/kWh) by country from Ember, Yearly
+    // Electricity Data (via Our World in Data), 2025 or the latest year
+    // available. Sub-national zones (US-CAL-CISO, CA-ON) use their country.
+    static const std::map<std::string, double> countryIntensity = {
+        {"AE", 468}, {"AR", 346}, {"AT", 117}, {"AU", 525}, {"BE", 150}, {"BG", 276},
+        {"BR", 110}, {"CA", 191}, {"CH", 39}, {"CL", 289}, {"CN", 525}, {"CZ", 401},
+        {"DE", 330}, {"DK", 114}, {"EE", 319}, {"EG", 563}, {"ES", 154}, {"FI", 57},
+        {"FR", 41}, {"GB", 217}, {"GR", 315}, {"HR", 158}, {"HU", 163}, {"ID", 680},
+        {"IE", 257}, {"IL", 493}, {"IN", 670}, {"IT", 285}, {"JP", 477}, {"KR", 417},
+        {"LT", 138}, {"LV", 139}, {"MX", 474}, {"MY", 602}, {"NL", 254}, {"NO", 28},
+        {"NZ", 93}, {"PH", 588}, {"PL", 589}, {"PT", 128}, {"RO", 251}, {"SA", 692},
+        {"SE", 35}, {"SG", 497}, {"SI", 183}, {"SK", 95}, {"TH", 546}, {"TR", 475},
+        {"TW", 633}, {"UA", 250}, {"US", 384}, {"VN", 461}, {"ZA", 699},
     };
 
-    static const std::map<std::string, ZoneData> zoneMap = {
-        {"PL",      {650, 750}},   // Poland - coal-heavy
-        {"DE",      {350, 450}},   // Germany - mixed
-        {"FR",      {60, 80}},     // France - nuclear
-        {"SE",      {25, 40}},     // Sweden - hydro/nuclear
-        {"NO",      {20, 30}},     // Norway - hydro
-        {"GB",      {200, 280}},   // UK - gas/wind
-        {"ES",      {180, 250}},   // Spain - solar/wind
-        {"IT",      {300, 380}},   // Italy - gas
-        {"US-CAL",  {200, 300}},   // California - solar/gas
-        {"US-NY",   {250, 320}},   // New York
-        {"US-TEX",  {380, 450}},   // Texas - gas/wind
-        {"US-MIDA", {400, 480}},   // Mid-Atlantic
-        {"CN",      {550, 650}},   // China - coal
-        {"IN",      {650, 720}},   // India - coal
-        {"JP",      {450, 530}},   // Japan - gas/coal
-        {"AU",      {550, 650}},   // Australia - coal
-        {"BR",      {80, 120}},    // Brazil - hydro
-        {"CA-ON",   {30, 50}},     // Ontario - nuclear/hydro
-        {"CA-QC",   {10, 15}},     // Quebec - hydro
-        {"DK",      {150, 250}},   // Denmark - wind
-        {"FI",      {80, 120}},    // Finland - nuclear/hydro
-        {"AT",      {100, 160}},   // Austria - hydro
-        {"CH",      {30, 50}},     // Switzerland - hydro/nuclear
-        {"CZ",      {450, 550}},   // Czech Republic - coal
-        {"NL",      {350, 430}},   // Netherlands - gas
-    };
-
-    auto it = zoneMap.find(zone);
-    ZoneData zd = (it != zoneMap.end()) ? it->second : ZoneData{400, 500};
-
-    // Day = 6:00-18:00
-    if (hour >= 6 && hour < 18) {
-        return zd.dayIntensity;
-    } else {
-        return zd.nightIntensity;
-    }
+    std::string z = NormalizeZone(zone);
+    auto it = countryIntensity.find(z);
+    if (it == countryIntensity.end()) it = countryIntensity.find(z.substr(0, z.find('-')));
+    return it != countryIntensity.end() ? it->second : kGlobalAverageIntensity;
 }
 
 std::vector<std::pair<std::string, std::string>> CarbonAPI::GetCommonZones() {
@@ -282,10 +293,11 @@ std::vector<std::pair<std::string, std::string>> CarbonAPI::GetCommonZones() {
         {"AT",      "Austria"},
         {"CZ",      "Czech Republic"},
         {"FI",      "Finland"},
-        {"US-CAL",  "USA - California"},
-        {"US-NY",   "USA - New York"},
-        {"US-TEX",  "USA - Texas"},
-        {"US-MIDA", "USA - Mid-Atlantic"},
+        {"US",          "USA (national average)"},
+        {"US-CAL-CISO", "USA - California"},
+        {"US-NY-NYIS",  "USA - New York"},
+        {"US-TEX-ERCO", "USA - Texas"},
+        {"US-MIDA-PJM", "USA - Mid-Atlantic"},
         {"CA-ON",   "Canada - Ontario"},
         {"CA-QC",   "Canada - Quebec"},
         {"JP",      "Japan"},
@@ -309,8 +321,8 @@ std::string CarbonAPI::CountryToZone(const std::string& countryCode) {
         {"EE", "EE"}, {"SI", "SI"}, {"GR", "GR"},
         {"JP", "JP"}, {"CN", "CN"}, {"IN", "IN"},
         {"AU", "AU"}, {"BR", "BR"}, {"KR", "KR"},
-        {"CA", "CA-ON"}, {"US", "US-MIDA"},
-        {"MX", "MX"}, {"AR", "AR"}, {"CL", "CL"},
+        {"CA", "CA"}, {"US", "US"},
+        {"MX", "MX"}, {"AR", "AR"}, {"CL", "CL-SEN"},
         {"ZA", "ZA"}, {"NZ", "NZ"}, {"TW", "TW"},
         {"SG", "SG"}, {"TH", "TH"}, {"MY", "MY"},
         {"ID", "ID"}, {"PH", "PH"}, {"VN", "VN"},
@@ -323,35 +335,107 @@ std::string CarbonAPI::CountryToZone(const std::string& countryCode) {
     return countryCode; // Use country code directly as fallback
 }
 
-std::string CarbonAPI::AutoDetectZone() {
-    // Use ipapi.co (free, no key required, returns country code)
-    CarbonAPI tempApi;
+// ---- Offline country guess ----
 
-    std::string response = tempApi.HttpGet("https://ipapi.co/json/");
-    if (!response.empty()) {
-        std::string country = ExtractJsonValue(response, "country_code");
-        if (!country.empty()) {
-            std::string zone = CountryToZone(country);
-            std::string city = ExtractJsonValue(response, "city");
-            std::string region = ExtractJsonValue(response, "region");
-            std::cout << "[GeoIP] Detected location: " << city
-                      << (region.empty() ? "" : ", " + region)
-                      << " (" << country << ") -> Zone: " << zone << "\n";
-            return zone;
+static std::string CountryFromTimeZone() {
+    // IANA time zone -> country
+    static const std::map<std::string, std::string> tzCountry = {
+        {"Europe/Warsaw", "PL"}, {"Europe/Berlin", "DE"}, {"Europe/Paris", "FR"},
+        {"Europe/London", "GB"}, {"Europe/Stockholm", "SE"}, {"Europe/Oslo", "NO"},
+        {"Europe/Madrid", "ES"}, {"Europe/Rome", "IT"}, {"Europe/Copenhagen", "DK"},
+        {"Europe/Amsterdam", "NL"}, {"Europe/Zurich", "CH"}, {"Europe/Vienna", "AT"},
+        {"Europe/Prague", "CZ"}, {"Europe/Helsinki", "FI"}, {"Europe/Lisbon", "PT"},
+        {"Europe/Brussels", "BE"}, {"Europe/Dublin", "IE"}, {"Europe/Bucharest", "RO"},
+        {"Europe/Budapest", "HU"}, {"Europe/Bratislava", "SK"}, {"Europe/Zagreb", "HR"},
+        {"Europe/Sofia", "BG"}, {"Europe/Athens", "GR"}, {"Europe/Vilnius", "LT"},
+        {"Europe/Riga", "LV"}, {"Europe/Tallinn", "EE"}, {"Europe/Ljubljana", "SI"},
+        {"Europe/Kyiv", "UA"}, {"Europe/Kiev", "UA"}, {"Europe/Istanbul", "TR"},
+        {"Asia/Tokyo", "JP"}, {"Asia/Shanghai", "CN"}, {"Asia/Kolkata", "IN"},
+        {"Asia/Seoul", "KR"}, {"Asia/Taipei", "TW"}, {"Asia/Singapore", "SG"},
+        {"Australia/Sydney", "AU"}, {"Australia/Melbourne", "AU"},
+        {"Pacific/Auckland", "NZ"}, {"America/Sao_Paulo", "BR"},
+        {"America/Toronto", "CA"}, {"America/Mexico_City", "MX"},
+        {"America/New_York", "US"}, {"America/Chicago", "US"},
+        {"America/Denver", "US"}, {"America/Los_Angeles", "US"},
+    };
+    std::vector<std::string> names;
+#ifndef PLATFORM_WINDOWS
+    if (const char* tz = std::getenv("TZ")) names.push_back(tz[0] == ':' ? tz + 1 : tz);
+    std::ifstream tzFile("/etc/timezone");
+    std::string line;
+    if (tzFile && std::getline(tzFile, line)) names.push_back(line);
+    char link[512] = {};
+    ssize_t n = readlink("/etc/localtime", link, sizeof(link) - 1);
+    if (n > 0) {
+        std::string target(link, static_cast<size_t>(n));
+        size_t p = target.find("zoneinfo/");
+        if (p != std::string::npos) names.push_back(target.substr(p + 9));
+    }
+#endif
+    for (const auto& name : names) {
+        auto it = tzCountry.find(name);
+        if (it != tzCountry.end()) return it->second;
+    }
+    return "";
+}
+
+static std::string CountryFromLocale() {
+#ifdef PLATFORM_WINDOWS
+    return "";
+#else
+    // "pl_PL.UTF-8" -> "PL"
+    for (const char* var : {"LC_ALL", "LC_MESSAGES", "LANG"}) {
+        const char* v = std::getenv(var);
+        if (!v) continue;
+        std::string s(v);
+        size_t u = s.find('_');
+        if (u != std::string::npos && s.size() >= u + 3) {
+            std::string c = s.substr(u + 1, 2);
+            for (auto& ch : c) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            return c;
         }
     }
+    return "";
+#endif
+}
 
-    // Fallback: try ip-api.com
-    response = tempApi.HttpGet("https://ip-api.com/json/?fields=countryCode,city,regionName");
-    if (!response.empty()) {
-        std::string country = ExtractJsonValue(response, "countryCode");
-        if (!country.empty()) {
-            std::string zone = CountryToZone(country);
-            std::string city = ExtractJsonValue(response, "city");
-            std::cout << "[GeoIP] Detected location: " << city
-                      << " (" << country << ") -> Zone: " << zone << "\n";
-            return zone;
-        }
+std::string CarbonAPI::AutoDetectZone() {
+    CarbonAPI tempApi;
+
+    // (url, country field)
+    const std::pair<const char*, const char*> endpoints[] = {
+        {"https://ipapi.co/json/", "country_code"},
+        {"https://ipinfo.io/json", "country"},
+        {"https://ipwho.is/", "country_code"},
+    };
+    for (const auto& [url, field] : endpoints) {
+        std::string response = tempApi.HttpGet(url);
+        if (response.empty()) continue;
+        std::string country = ExtractJsonValue(response, field);
+        if (country.size() != 2) continue;
+        for (auto& ch : country) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        std::string zone = CountryToZone(country);
+        std::string city = ExtractJsonValue(response, "city");
+        std::cout << "[GeoIP] Detected location: " << city
+                  << " (" << country << ") -> Zone: " << zone << "\n";
+        return zone;
+    }
+
+    // Offline: Windows region setting, then time zone, then locale.
+    std::string country, source;
+#ifdef PLATFORM_WINDOWS
+    char iso2[8] = {};
+    if (GetGeoInfoA(GetUserGeoID(GEOCLASS_NATION), GEO_ISO2, iso2, sizeof(iso2), 0) > 0) {
+        country = iso2;
+        source = "region setting";
+    }
+#endif
+    if (country.empty()) { country = CountryFromTimeZone(); source = "time zone"; }
+    if (country.empty()) { country = CountryFromLocale(); source = "locale"; }
+    if (!country.empty()) {
+        std::string zone = CountryToZone(country);
+        std::cout << "[GeoIP] Offline: zone " << zone << " from the " << source << ".\n";
+        return zone;
     }
 
     std::cerr << "[GeoIP] Could not auto-detect location. Using default zone.\n";

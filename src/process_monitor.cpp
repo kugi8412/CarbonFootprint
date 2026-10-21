@@ -8,6 +8,15 @@
 std::map<std::string, PerProcessCpuState> ProcessMonitor::processStates_;
 std::mutex ProcessMonitor::statesMutex_;
 
+void ProcessMonitor::PruneProcessStates(double now) {
+    // Drop entries not updated for a minute (exited processes)
+    std::lock_guard<std::mutex> lock(statesMutex_);
+    for (auto it = processStates_.begin(); it != processStates_.end();) {
+        if (now - it->second.lastWallTime > 60.0) it = processStates_.erase(it);
+        else ++it;
+    }
+}
+
 // Windows Implementation
 #ifdef PLATFORM_WINDOWS
 
@@ -48,19 +57,21 @@ std::string ProcessMonitor::GetActiveProcessName() {
     DWORD processId;
     GetWindowThreadProcessId(hwnd, &processId);
 
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    // LIMITED_INFORMATION also works for elevated processes
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
     if (hProcess == NULL) return "Unknown";
 
-    char processName[MAX_PATH] = "<unknown>";
-    HMODULE hMod;
-    DWORD cbNeeded;
-
-    if (EnumProcessModules(hProcess, &hMod, sizeof(hMod), &cbNeeded)) {
-        GetModuleBaseNameA(hProcess, hMod, processName, sizeof(processName));
+    char path[MAX_PATH] = "<unknown>";
+    DWORD size = MAX_PATH;
+    std::string processName = "<unknown>";
+    if (QueryFullProcessImageNameA(hProcess, 0, path, &size)) {
+        processName = std::string(path, size);
+        size_t slash = processName.find_last_of("\\/");
+        if (slash != std::string::npos) processName = processName.substr(slash + 1);
     }
 
     CloseHandle(hProcess);
-    return std::string(processName);
+    return processName;
 }
 
 std::string ProcessMonitor::GetActiveWindowTitle() {
@@ -160,7 +171,8 @@ std::map<std::string, double> ProcessMonitor::GetMultiProcessCpuUsage(const std:
         double totalCpuPercent = 0.0;
 
         for (unsigned long pid : pids) {
-            HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+            // LIMITED_INFORMATION also works for elevated processes
+            HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
             if (!hProc) continue;
 
             FILETIME createTime, exitTime, kernelTime, userTime;
@@ -182,7 +194,8 @@ std::map<std::string, double> ProcessMonitor::GetMultiProcessCpuUsage(const std:
                     if (wallDelta > 0.05) {
                         double cpuDelta = (kSec - state.lastKernelTime) + (uSec - state.lastUserTime);
                         double percent = (cpuDelta / wallDelta) * 100.0 / numProcessors;
-                        state.lastCpuPercent = std::min(percent, 100.0);
+                        // A recycled PID makes the delta negative.
+                        state.lastCpuPercent = std::clamp(percent, 0.0, 100.0);
                     }
                 }
                 state.lastKernelTime = kSec;
@@ -194,28 +207,13 @@ std::map<std::string, double> ProcessMonitor::GetMultiProcessCpuUsage(const std:
         }
         result[procName] = std::min(totalCpuPercent, 100.0);
     }
+    PruneProcessStates(now);
     return result;
 }
 
 bool ProcessMonitor::IsProcessRunning(const std::string& processName) {
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return false;
-
-    PROCESSENTRY32 pe;
-    pe.dwSize = sizeof(PROCESSENTRY32);
-    bool found = false;
-
-    if (Process32First(hSnapshot, &pe)) {
-        do {
-            std::string name(pe.szExeFile);
-            if (processName == name) {
-                found = true;
-                break;
-            }
-        } while (Process32Next(hSnapshot, &pe));
-    }
-    CloseHandle(hSnapshot);
-    return found;
+    // Same matching as the CPU lookup (case-insensitive, ".exe" optional)
+    return !GetProcessPids(processName).empty();
 }
 
 // Linux Implementation
@@ -505,35 +503,13 @@ std::map<std::string, double> ProcessMonitor::GetMultiProcessCpuUsage(const std:
         }
         result[procName] = std::min(totalCpuPercent, 100.0);
     }
+    PruneProcessStates(now);
     return result;
 }
 
 bool ProcessMonitor::IsProcessRunning(const std::string& processName) {
-    DIR* dir = opendir("/proc");
-    if (!dir) return false;
-
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        if (entry->d_type != DT_DIR) continue;
-        bool isNumeric = true;
-        for (const char* p = entry->d_name; *p; ++p) {
-            if (*p < '0' || *p > '9') { isNumeric = false; break; }
-        }
-        if (!isNumeric) continue;
-
-        std::string commPath = std::string("/proc/") + entry->d_name + "/comm";
-        std::ifstream commFile(commPath);
-        if (commFile.is_open()) {
-            std::string name;
-            std::getline(commFile, name);
-            if (name == processName) {
-                closedir(dir);
-                return true;
-            }
-        }
-    }
-    closedir(dir);
-    return false;
+    // Same matching as the CPU lookup, so running and CPU checks agree.
+    return !GetProcessPids(processName).empty();
 }
 
 // macOS Implementation
@@ -703,7 +679,9 @@ std::map<std::string, double> ProcessMonitor::GetMultiProcessCpuUsage(const std:
 }
 
 bool ProcessMonitor::IsProcessRunning(const std::string& processName) {
-    std::string cmd = "pgrep -x '" + processName + "' > /dev/null 2>&1";
+    // The name goes into a single-quoted shell command
+    if (processName.find('\'') != std::string::npos) return false;
+    std::string cmd = "pgrep -ix '" + processName + "' > /dev/null 2>&1";
     return system(cmd.c_str()) == 0;
 }
 

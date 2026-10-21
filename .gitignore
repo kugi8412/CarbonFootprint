@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# C++ build output
+out/
+*.exe
+*.obj
+*.o
+
+# Reports written by the tracker
+carbon_report_*.json
+
+# Editors
+.vscode/
+.idea/
